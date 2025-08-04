@@ -1,42 +1,49 @@
 // Next.js API route support: https://nextjs.org/docs/api-routes/introduction
 import {
   createAssociatedTokenAccountInstruction,
-  createInitializeMintInstruction,
-  createMintToCheckedInstruction,
+  createTransferInstruction,
   getAssociatedTokenAddress,
-  getMinimumBalanceForRentExemptMint,
-  MINT_SIZE,
   TOKEN_PROGRAM_ID,
 } from "@solana/spl-token";
 import {
   clusterApiUrl,
   Connection,
   Keypair,
-  NonceAccount,
   PublicKey,
-  SystemProgram,
   Transaction,
+  TransactionInstruction,
+  SystemProgram,
 } from "@solana/web3.js";
 import base58 from "bs58";
 import type { NextApiRequest, NextApiResponse } from "next";
-import createDurableNonce from "../../utils/nonce";
+import { createEncryptionMiddleware } from "../../utils/encrytption"; // Adjust path as needed
+
+// Memo Program ID on Solana
+const MEMO_PROGRAM_ID = new PublicKey("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr");
 
 type Data = {
   result: "success" | "error";
   message:
-    | {
-        tx: string;
-        signatures: ({ key: string; signature: string | null } | null)[];
-      }
-    | { error: Error };
+  | {
+    tx: string;
+    signatures: ({ key: string; signature: string | null } | null)[];
+  }
+  | { error: Error };
 };
+
+// Initialize encryption middleware
+const encryptionMiddleware = createEncryptionMiddleware(
+  process.env.AES_ENCRYPTION_KEY || 'default-key',
+  process.env.AES_ENCRYPTION_IV || 'default-iv-16b!!' // Must be exactly 16 bytes
+);
 
 export default async function handler(
   req: NextApiRequest,
   res: NextApiResponse<Data>
 ) {
   console.log(`[API] /api/tx - Request started - Method: ${req.method}`);
-  
+  console.log(`[API] /api/tx - Headers:`, req.headers);
+
   try {
     // Only allow POST requests
     if (req.method !== 'POST') {
@@ -47,246 +54,302 @@ export default async function handler(
       });
     }
 
-    console.log(`[API] /api/tx - Request body:`, req.body);
-    const { address } = req.body;
-    
-    // Validate that address is provided
-    if (!address || typeof address !== 'string') {
-      console.log(`[API] /api/tx - Invalid address:`, address);
-      return res.status(400).json({
-        result: "error",
-        message: { error: new Error("Address is required and must be a string") }
-      });
-    }
+    // Process request data (decrypt if IS_ENCRYPTED header is set)
+    const processedBody = encryptionMiddleware.processRequest(req.body, req.headers);
+    console.log(`[API] /api/tx - Processed request body:`, processedBody);
 
-    console.log(`[API] /api/tx - Validating public key: ${address}`);
-    // Validate that the address is a valid public key format
-    let user: PublicKey;
-    try {
-      user = new PublicKey(address);
-      console.log(`[API] /api/tx - Public key validated successfully: ${user.toBase58()}`);
-    } catch (error) {
-      console.log(`[API] /api/tx - Invalid public key format: ${address}`, error);
-      return res.status(400).json({
-        result: "error", 
-        message: { error: new Error("Invalid public key format") }
-      });
-    }
+    const {
+      senderAddress,
+      receiverAddress,
+      tokenMint,
+      amount,
+      transactionFee,
+      transactionFeeAddress,
+      narration
+    } = processedBody;
 
-    console.log(`[API] /api/tx - Creating mint keypair`);
-    const mint = Keypair.generate();
-    console.log(`[API] /api/tx - Mint public key: ${mint.publicKey.toBase58()}`);
-    
-    console.log(`[API] /api/tx - Creating connection to mainnet`);
-    const connection = new Connection(clusterApiUrl("mainnet-beta"), "finalized");
-    
-    console.log(`[API] /api/tx - Loading wallet from environment`);
-    if (!process.env.WALLET) {
-      console.log(`[API] /api/tx - WALLET environment variable not found`);
-      return res.status(500).json({
-        result: "error",
-        message: { error: new Error("Wallet environment variable not configured") }
-      });
-    }
-    
-    let wallet: Keypair;
-    try {
-      wallet = Keypair.fromSecretKey(base58.decode(process.env.WALLET));
-      console.log(`[API] /api/tx - Wallet loaded successfully: ${wallet.publicKey.toBase58()}`);
-    } catch (error) {
-      console.log(`[API] /api/tx - Failed to load wallet:`, error);
-      return res.status(500).json({
-        result: "error",
-        message: { error: new Error("Invalid wallet configuration") }
-      });
-    }
-    
-    console.log(`[API] /api/tx - Creating durable nonce`);
-    let nonceAccount, nonceAccountAuth;
-    try {
-      const nonceResult = await createDurableNonce(wallet);
-      nonceAccount = nonceResult.nonceAccount;
-      nonceAccountAuth = nonceResult.nonceAccountAuth;
-      console.log(`[API] /api/tx - Nonce account created: ${nonceAccount.publicKey.toBase58()}`);
-    } catch (error) {
-      console.log(`[API] /api/tx - Failed to create durable nonce:`, error);
-      return res.status(500).json({
-        result: "error",
-        message: { error: new Error("Failed to create durable nonce") }
-      });
-    }
-
-    console.log(`[API] /api/tx - Getting associated token address`);
-    let ata;
-    try {
-      ata = await getAssociatedTokenAddress(
-        mint.publicKey, // mint
-        user // owner
+    // Validate required parameters
+    if (!senderAddress || typeof senderAddress !== 'string') {
+      const errorResponse = {
+        result: "error" as const,
+        message: { error: new Error("Sender address is required and must be a string") }
+      };
+      return res.status(400).json(
+        encryptionMiddleware.processResponse(errorResponse, req.headers)
       );
-      console.log(`[API] /api/tx - Associated token address: ${ata.toBase58()}`);
-    } catch (error) {
-      console.log(`[API] /api/tx - Failed to get associated token address:`, error);
-      return res.status(500).json({
-        result: "error",
-        message: { error: new Error("Failed to get associated token address") }
-      });
     }
-    
-    console.log(`[API] /api/tx - Building transaction`);
-    let txn;
-    try {
-      const lamports = await getMinimumBalanceForRentExemptMint(connection);
-      console.log(`[API] /api/tx - Required lamports for mint: ${lamports}`);
-      
-      txn = new Transaction().add(
-        SystemProgram.nonceAdvance({
-          noncePubkey: nonceAccount.publicKey,
-          authorizedPubkey: nonceAccountAuth.publicKey,
-        }),
-        SystemProgram.createAccount({
-          fromPubkey: wallet.publicKey,
-          newAccountPubkey: mint.publicKey,
-          space: MINT_SIZE,
-          lamports: lamports,
-          programId: TOKEN_PROGRAM_ID,
-        }),
-        // init mint account
-        createInitializeMintInstruction(
-          mint.publicKey, // mint pubkey
-          0, // decimals
-          wallet.publicKey, // mint authority
-          wallet.publicKey // freeze authority (you can use `null` to disable it. when you disable it, you can't turn it on again)
-        ),
-        createAssociatedTokenAccountInstruction(
-          wallet.publicKey, // payer
-          ata, // ata
-          user, // owner
-          mint.publicKey // mint
-        ),
-        createMintToCheckedInstruction(
-          mint.publicKey, // mint
-          ata, // receiver (should be a token account)
-          wallet.publicKey, // mint authority
-          1, // amount. if your decimals is 8, you mint 10^8 for 1 token.
-          0 // decimals
-          // [signer1, signer2 ...], // only multisig account will use
-        )
+
+    if (!receiverAddress || typeof receiverAddress !== 'string') {
+      const errorResponse = {
+        result: "error" as const,
+        message: { error: new Error("Receiver address is required and must be a string") }
+      };
+      return res.status(400).json(
+        encryptionMiddleware.processResponse(errorResponse, req.headers)
       );
-      console.log(`[API] /api/tx - Transaction built successfully with ${txn.instructions.length} instructions`);
-    } catch (error) {
-      console.log(`[API] /api/tx - Failed to build transaction:`, error);
-      return res.status(500).json({
-        result: "error",
-        message: { error: new Error("Failed to build transaction") }
-      });
     }
-    
-    console.log(`[API] /api/tx - Getting nonce from account`);
-    let nonce: string | null = null;
-    let nonceAttempts = 0;
-    const maxNonceAttempts = 20; // Increased from 10 to 20
-    
-    while (nonce === null && nonceAttempts < maxNonceAttempts) {
-      nonceAttempts++;
-      console.log(`[API] /api/tx - Nonce attempt ${nonceAttempts}/${maxNonceAttempts}`);
-      
-      try {
-        const alchemyConnection = new Connection(process.env.ALCHEMY!, "recent");
-        let nonceAccountInfo = await alchemyConnection.getAccountInfo(
-          nonceAccount.publicKey,
-          {
-            commitment: "recent",
-          }
+
+    if (!tokenMint || typeof tokenMint !== 'string') {
+      const errorResponse = {
+        result: "error" as const,
+        message: { error: new Error("Token mint address is required and must be a string") }
+      };
+      return res.status(400).json(
+        encryptionMiddleware.processResponse(errorResponse, req.headers)
+      );
+    }
+
+    if (!amount || typeof amount !== 'number' || amount <= 0) {
+      const errorResponse = {
+        result: "error" as const,
+        message: { error: new Error("Amount is required and must be a positive number") }
+      };
+      return res.status(400).json(
+        encryptionMiddleware.processResponse(errorResponse, req.headers)
+      );
+    }
+
+    // Validate transaction fee parameters (optional)
+    if (transactionFee !== undefined && transactionFee !== null) {
+      if (typeof transactionFee !== 'number' || transactionFee <= 0) {
+        const errorResponse = {
+          result: "error" as const,
+          message: { error: new Error("Transaction fee must be a positive number") }
+        };
+        return res.status(400).json(
+          encryptionMiddleware.processResponse(errorResponse, req.headers)
         );
-        console.log(`[API] /api/tx - Nonce account info:`, nonceAccountInfo);
-        
-        if (nonceAccountInfo === null) {
-          console.log(`[API] /api/tx - Nonce account info is null, retrying...`);
-          // Add a small delay before retrying
-          await new Promise(resolve => setTimeout(resolve, 1000));
-          continue;
-        } else {
-          let nonceAccountNonce = NonceAccount.fromAccountData(
-            nonceAccountInfo?.data
-          );
-          nonce = nonceAccountNonce.nonce;
-          console.log(`[API] /api/tx - Nonce retrieved successfully: ${nonce}`);
-        }
-      } catch (error) {
-        console.log(`[API] /api/tx - Error getting nonce (attempt ${nonceAttempts}):`, error);
-        // Add a small delay before retrying
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        if (nonceAttempts >= maxNonceAttempts) {
-          return res.status(500).json({
-            result: "error",
-            message: { error: new Error("Failed to get nonce after maximum attempts") }
-          });
-        }
+      }
+
+      if (!transactionFeeAddress || typeof transactionFeeAddress !== 'string') {
+        const errorResponse = {
+          result: "error" as const,
+          message: { error: new Error("Transaction fee address is required when transaction fee is provided") }
+        };
+        return res.status(400).json(
+          encryptionMiddleware.processResponse(errorResponse, req.headers)
+        );
       }
     }
 
-    if (!nonce) {
-      console.log(`[API] /api/tx - Failed to get nonce after ${maxNonceAttempts} attempts`);
-      return res.status(500).json({
-        result: "error",
-        message: { error: new Error("Failed to get nonce") }
-      });
+    // Validate narration (optional)
+    if (narration !== undefined && narration !== null && typeof narration !== 'string') {
+      const errorResponse = {
+        result: "error" as const,
+        message: { error: new Error("Narration must be a string") }
+      };
+      return res.status(400).json(
+        encryptionMiddleware.processResponse(errorResponse, req.headers)
+      );
     }
 
-    console.log(`[API] /api/tx - Final check values:`, {
-      user: user.toBase58(),
-      ata: ata.toBase58(),
-      mint: mint.publicKey.toBase58(),
-      nonce: nonce
-    });
+    // Validate public key formats
+    let sender: PublicKey;
+    let receiver: PublicKey;
+    let mint: PublicKey;
+    let feeReceiver: PublicKey | null = null;
 
-    console.log(`[API] /api/tx - Setting transaction properties`);
     try {
-      txn.recentBlockhash = nonce;
-      console.log(`[API] /api/tx - Recent blockhash set: ${txn.recentBlockhash}`);
-      txn.feePayer = wallet.publicKey;
-      console.log(`[API] /api/tx - Fee payer set: ${txn.feePayer.toBase58()}`);
+      sender = new PublicKey(senderAddress);
+      receiver = new PublicKey(receiverAddress);
+      mint = new PublicKey(tokenMint);
 
-      console.log(`[API] /api/tx - Partially signing transaction`);
-      txn.partialSign(mint, wallet, nonceAccountAuth);
-      console.log(`[API] /api/tx - Transaction signed successfully`);
-
-      console.log(`[API] /api/tx - Serializing transaction`);
-      const txnserialized = base58.encode(txn.serializeMessage());
-      console.log(`[API] /api/tx - Transaction serialized: ${txnserialized.substring(0, 50)}...`);
-
-      console.log(`[API] /api/tx - Processing signatures`);
-      const sigs = txn.signatures.map((s) => {
-        return {
-          key: s.publicKey.toBase58(),
-          signature: s.signature ? base58.encode(s.signature) : null,
-        };
-      });
-      console.log(`[API] /api/tx - Signatures processed:`, sigs);
-      
-      console.log(`[API] /api/tx - Sending success response`);
-      res.json({
-        result: "success",
-        message: {
-          tx: txnserialized,
-          signatures: sigs,
-        },
-      });
-      console.log(`[API] /api/tx - Request completed successfully`);
-      
+      if (transactionFeeAddress) {
+        feeReceiver = new PublicKey(transactionFeeAddress);
+      }
     } catch (error) {
-      console.log(`[API] /api/tx - Error in transaction processing:`, error);
-      res.status(500).json({ 
-        result: "error", 
-        message: { error: error as Error } 
-      });
+      const errorResponse = {
+        result: "error" as const,
+        message: { error: new Error("Invalid public key format") }
+      };
+      return res.status(400).json(
+        encryptionMiddleware.processResponse(errorResponse, req.headers)
+      );
     }
-    
+
+    console.log(`[API] /api/tx - Loading relayer wallet`);
+    if (!process.env.WALLET) {
+      console.log(`[API] /api/tx - WALLET environment variable not found`);
+      const errorResponse = {
+        result: "error" as const,
+        message: { error: new Error("Wallet environment variable not configured") }
+      };
+      return res.status(500).json(
+        encryptionMiddleware.processResponse(errorResponse, req.headers)
+      );
+    }
+
+    let relayerWallet: Keypair;
+    try {
+      relayerWallet = Keypair.fromSecretKey(base58.decode(process.env.WALLET));
+      console.log(`[API] /api/tx - Relayer wallet loaded: ${relayerWallet.publicKey.toBase58()}`);
+    } catch (error) {
+      console.log(`[API] /api/tx - Failed to load relayer wallet:`, error);
+      const errorResponse = {
+        result: "error" as const,
+        message: { error: new Error("Invalid relayer wallet configuration") }
+      };
+      return res.status(500).json(
+        encryptionMiddleware.processResponse(errorResponse, req.headers)
+      );
+    }
+
+    console.log(`[API] /api/tx - Creating connection to devnet`);
+    const connection = new Connection(clusterApiUrl("devnet"), "finalized");
+
+    console.log(`[API] /api/tx - Getting associated token addresses`);
+    const senderAta = await getAssociatedTokenAddress(mint, sender);
+    const receiverAta = await getAssociatedTokenAddress(mint, receiver);
+
+    // Get fee receiver ATA if transaction fee is specified
+    let feeReceiverAta: PublicKey | null = null;
+    if (feeReceiver && transactionFee) {
+      feeReceiverAta = await getAssociatedTokenAddress(mint, feeReceiver);
+    }
+
+    console.log(`[API] /api/tx - Building transaction with relayer as fee payer`);
+    const instructions = [];
+
+    // Check if sender ATA exists
+    const senderAccountInfo = await connection.getAccountInfo(senderAta);
+    if (!senderAccountInfo) {
+      console.log(`[API] /api/tx - Creating sender ATA (relayer pays)`);
+      instructions.push(
+        createAssociatedTokenAccountInstruction(
+          relayerWallet.publicKey, // RELAYER pays for ATA creation
+          senderAta,
+          sender,
+          mint
+        )
+      );
+    }
+
+    // Check if receiver ATA exists
+    const receiverAccountInfo = await connection.getAccountInfo(receiverAta);
+    if (!receiverAccountInfo) {
+      console.log(`[API] /api/tx - Creating receiver ATA (relayer pays)`);
+      instructions.push(
+        createAssociatedTokenAccountInstruction(
+          relayerWallet.publicKey, // RELAYER pays for ATA creation
+          receiverAta,
+          receiver,
+          mint
+        )
+      );
+    }
+
+    // Check if fee receiver ATA exists (if transaction fee is specified)
+    if (feeReceiverAta && feeReceiver) {
+      const feeReceiverAccountInfo = await connection.getAccountInfo(feeReceiverAta);
+      if (!feeReceiverAccountInfo) {
+        console.log(`[API] /api/tx - Creating fee receiver ATA (relayer pays)`);
+        instructions.push(
+          createAssociatedTokenAccountInstruction(
+            relayerWallet.publicKey, // RELAYER pays for ATA creation
+            feeReceiverAta,
+            feeReceiver,
+            mint
+          )
+        );
+      }
+    }
+
+    // Add main transfer instruction (sender authorizes, but relayer pays gas)
+    console.log(`[API] /api/tx - Adding main transfer instruction: ${amount} tokens`);
+    instructions.push(
+      createTransferInstruction(
+        senderAta,
+        receiverAta,
+        sender, // sender must authorize the transfer
+        amount
+      )
+    );
+
+    // Add transaction fee transfer instruction (if specified)
+    if (feeReceiverAta && feeReceiver && transactionFee) {
+      console.log(`[API] /api/tx - Adding transaction fee instruction: ${transactionFee} tokens to ${feeReceiver.toBase58()}`);
+      instructions.push(
+        createTransferInstruction(
+          senderAta,
+          feeReceiverAta,
+          sender, // sender must authorize the fee transfer
+          transactionFee
+        )
+      );
+    }
+
+    // Add memo instruction (if narration is provided)
+    if (narration && narration.trim() !== '') {
+      console.log(`[API] /api/tx - Adding memo instruction: "${narration}"`);
+      const memoInstruction = new TransactionInstruction({
+        keys: [],
+        programId: MEMO_PROGRAM_ID,
+        data: Buffer.from(narration, 'utf8'),
+      });
+      instructions.push(memoInstruction);
+    }
+
+    // Create transaction
+    const transaction = new Transaction().add(...instructions);
+
+    // Get recent blockhash
+    const { blockhash } = await connection.getLatestBlockhash('finalized');
+    transaction.recentBlockhash = blockhash;
+
+    // IMPORTANT: Set relayer as fee payer (this is what makes relayer pay gas)
+    transaction.feePayer = relayerWallet.publicKey;
+
+    console.log(`[API] /api/tx - Fee payer set to relayer: ${relayerWallet.publicKey.toBase58()}`);
+    console.log(`[API] /api/tx - Transaction instructions count: ${instructions.length}`);
+
+    // Pre-sign with relayer wallet (for gas payment and ATA creation)
+    transaction.partialSign(relayerWallet);
+    console.log(`[API] /api/tx - Transaction pre-signed by relayer`);
+
+    console.log(`[API] /api/tx - Serializing transaction for user signature`);
+    const serializedTx = base58.encode(
+      transaction.serialize({ requireAllSignatures: false })
+    );
+
+    const signatures = transaction.signatures.map((s) => ({
+      key: s.publicKey.toBase58(),
+      signature: s.signature ? base58.encode(s.signature) : null,
+    }));
+
+    console.log(`[API] /api/tx - Transaction ready - Relayer will pay gas fees`);
+    console.log(`[API] /api/tx - Fee payer: ${transaction.feePayer?.toBase58()}`);
+    console.log(`[API] /api/tx - Required signatures:`, signatures.length);
+    console.log(`[API] /api/tx - Main transfer: ${amount} tokens`);
+    if (transactionFee) {
+      console.log(`[API] /api/tx - Transaction fee: ${transactionFee} tokens to ${feeReceiver?.toBase58()}`);
+    }
+    if (narration) {
+      console.log(`[API] /api/tx - Memo: "${narration}"`);
+    }
+
+    const successResponse = {
+      result: "success" as const,
+      message: {
+        tx: serializedTx,
+        signatures: signatures,
+      },
+    };
+
+    // Process response data (encrypt if IS_ENCRYPTED header is set)
+    const processedResponse = encryptionMiddleware.processResponse(successResponse, req.headers);
+
+    res.json(processedResponse);
+
   } catch (error) {
-    console.log(`[API] /api/tx - Unexpected error:`, error);
-    res.status(500).json({ 
-      result: "error", 
-      message: { error: error as Error } 
-    });
+    console.log(`[API] /api/tx - Error:`, error);
+
+    const errorResponse = {
+      result: "error" as const,
+      message: { error: error as Error }
+    };
+
+    const processedErrorResponse = encryptionMiddleware.processResponse(errorResponse, req.headers);
+
+    res.status(500).json(processedErrorResponse);
   }
 }

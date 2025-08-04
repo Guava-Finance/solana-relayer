@@ -73,7 +73,8 @@ const createDurableNonce = async (feePayer: Keypair) => {
     }
   } catch (error) {
     console.log(`Error sending nonce creation transaction:`, error);
-    if (error.message?.includes('0x1')) {
+    // Type guard to check if error is an Error object with a message property
+    if (error instanceof Error && error.message?.includes('0x1')) {
       throw new Error(`Transaction failed: Insufficient SOL balance in relayer wallet. Please fund the relayer wallet with at least 0.01 SOL`);
     }
     throw error;

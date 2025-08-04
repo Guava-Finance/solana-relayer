@@ -194,8 +194,8 @@ export default async function handler(
       );
     }
 
-    console.log(`[API] /api/tx - Creating connection to devnet`);
-    const connection = new Connection(clusterApiUrl("devnet"), "finalized");
+    console.log(`[API] /api/tx - Creating connection to mainnet-beta`);
+    const connection = new Connection(clusterApiUrl("mainnet-beta"), "finalized");
 
     console.log(`[API] /api/tx - Getting associated token addresses`);
     const senderAta = await getAssociatedTokenAddress(mint, sender);

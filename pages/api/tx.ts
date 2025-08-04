@@ -1,11 +1,8 @@
 // Next.js API route support: https://nextjs.org/docs/api-routes/introduction
 import {
   createAssociatedTokenAccountInstruction,
-  createInitializeMintInstruction,
-  createMintToCheckedInstruction,
+  createTransferInstruction,
   getAssociatedTokenAddress,
-  getMinimumBalanceForRentExemptMint,
-  MINT_SIZE,
   TOKEN_PROGRAM_ID,
 } from "@solana/spl-token";
 import {
@@ -48,9 +45,9 @@ export default async function handler(
     }
 
     console.log(`[API] /api/tx - Request body:`, req.body);
-    const { address } = req.body;
+    const { address, tokenMint, amount } = req.body;
     
-    // Validate that address is provided
+    // Validate that required parameters are provided
     if (!address || typeof address !== 'string') {
       console.log(`[API] /api/tx - Invalid address:`, address);
       return res.status(400).json({
@@ -59,23 +56,47 @@ export default async function handler(
       });
     }
 
-    console.log(`[API] /api/tx - Validating public key: ${address}`);
-    // Validate that the address is a valid public key format
-    let user: PublicKey;
-    try {
-      user = new PublicKey(address);
-      console.log(`[API] /api/tx - Public key validated successfully: ${user.toBase58()}`);
-    } catch (error) {
-      console.log(`[API] /api/tx - Invalid public key format: ${address}`, error);
+    if (!tokenMint || typeof tokenMint !== 'string') {
+      console.log(`[API] /api/tx - Invalid token mint:`, tokenMint);
       return res.status(400).json({
-        result: "error", 
-        message: { error: new Error("Invalid public key format") }
+        result: "error",
+        message: { error: new Error("Token mint address is required and must be a string") }
       });
     }
 
-    console.log(`[API] /api/tx - Creating mint keypair`);
-    const mint = Keypair.generate();
-    console.log(`[API] /api/tx - Mint public key: ${mint.publicKey.toBase58()}`);
+    if (!amount || typeof amount !== 'number' || amount <= 0) {
+      console.log(`[API] /api/tx - Invalid amount:`, amount);
+      return res.status(400).json({
+        result: "error",
+        message: { error: new Error("Amount is required and must be a positive number") }
+      });
+    }
+
+    console.log(`[API] /api/tx - Validating public keys`);
+    // Validate that the addresses are valid public key formats
+    let user: PublicKey;
+    let mint: PublicKey;
+    try {
+      user = new PublicKey(address);
+      console.log(`[API] /api/tx - User public key validated: ${user.toBase58()}`);
+    } catch (error) {
+      console.log(`[API] /api/tx - Invalid user public key format: ${address}`, error);
+      return res.status(400).json({
+        result: "error", 
+        message: { error: new Error("Invalid user public key format") }
+      });
+    }
+
+    try {
+      mint = new PublicKey(tokenMint);
+      console.log(`[API] /api/tx - Token mint validated: ${mint.toBase58()}`);
+    } catch (error) {
+      console.log(`[API] /api/tx - Invalid token mint format: ${tokenMint}`, error);
+      return res.status(400).json({
+        result: "error", 
+        message: { error: new Error("Invalid token mint format") }
+      });
+    }
     
     console.log(`[API] /api/tx - Creating connection to mainnet`);
     const connection = new Connection(clusterApiUrl("mainnet-beta"), "finalized");
@@ -116,62 +137,79 @@ export default async function handler(
       });
     }
 
-    console.log(`[API] /api/tx - Getting associated token address`);
-    let ata;
+    console.log(`[API] /api/tx - Getting associated token addresses`);
+    let senderAta, receiverAta;
     try {
-      ata = await getAssociatedTokenAddress(
-        mint.publicKey, // mint
-        user // owner
+      senderAta = await getAssociatedTokenAddress(
+        mint, // mint
+        wallet.publicKey // sender (relayer wallet)
       );
-      console.log(`[API] /api/tx - Associated token address: ${ata.toBase58()}`);
+      receiverAta = await getAssociatedTokenAddress(
+        mint, // mint
+        user // receiver (user)
+      );
+      console.log(`[API] /api/tx - Sender ATA: ${senderAta.toBase58()}`);
+      console.log(`[API] /api/tx - Receiver ATA: ${receiverAta.toBase58()}`);
     } catch (error) {
-      console.log(`[API] /api/tx - Failed to get associated token address:`, error);
+      console.log(`[API] /api/tx - Failed to get associated token addresses:`, error);
       return res.status(500).json({
         result: "error",
-        message: { error: new Error("Failed to get associated token address") }
+        message: { error: new Error("Failed to get associated token addresses") }
       });
     }
     
-    console.log(`[API] /api/tx - Building transaction`);
+    console.log(`[API] /api/tx - Building transfer transaction`);
     let txn;
     try {
-      const lamports = await getMinimumBalanceForRentExemptMint(connection);
-      console.log(`[API] /api/tx - Required lamports for mint: ${lamports}`);
+      const instructions = [];
       
-      txn = new Transaction().add(
+      // Add nonce advance instruction
+      instructions.push(
         SystemProgram.nonceAdvance({
           noncePubkey: nonceAccount.publicKey,
           authorizedPubkey: nonceAccountAuth.publicKey,
-        }),
-        SystemProgram.createAccount({
-          fromPubkey: wallet.publicKey,
-          newAccountPubkey: mint.publicKey,
-          space: MINT_SIZE,
-          lamports: lamports,
-          programId: TOKEN_PROGRAM_ID,
-        }),
-        // init mint account
-        createInitializeMintInstruction(
-          mint.publicKey, // mint pubkey
-          0, // decimals
-          wallet.publicKey, // mint authority
-          wallet.publicKey // freeze authority (you can use `null` to disable it. when you disable it, you can't turn it on again)
-        ),
-        createAssociatedTokenAccountInstruction(
-          wallet.publicKey, // payer
-          ata, // ata
-          user, // owner
-          mint.publicKey // mint
-        ),
-        createMintToCheckedInstruction(
-          mint.publicKey, // mint
-          ata, // receiver (should be a token account)
-          wallet.publicKey, // mint authority
-          1, // amount. if your decimals is 8, you mint 10^8 for 1 token.
-          0 // decimals
-          // [signer1, signer2 ...], // only multisig account will use
+        })
+      );
+
+      // Check if sender ATA exists, if not create it
+      const senderAccountInfo = await connection.getAccountInfo(senderAta);
+      if (!senderAccountInfo) {
+        console.log(`[API] /api/tx - Creating sender ATA`);
+        instructions.push(
+          createAssociatedTokenAccountInstruction(
+            wallet.publicKey, // payer
+            senderAta, // ata
+            wallet.publicKey, // owner
+            mint // mint
+          )
+        );
+      }
+
+      // Check if receiver ATA exists, if not create it
+      const receiverAccountInfo = await connection.getAccountInfo(receiverAta);
+      if (!receiverAccountInfo) {
+        console.log(`[API] /api/tx - Creating receiver ATA`);
+        instructions.push(
+          createAssociatedTokenAccountInstruction(
+            wallet.publicKey, // payer
+            receiverAta, // ata
+            user, // owner
+            mint // mint
+          )
+        );
+      }
+
+      // Add transfer instruction
+      instructions.push(
+        createTransferInstruction(
+          senderAta, // from
+          receiverAta, // to
+          wallet.publicKey, // authority
+          amount // amount
         )
       );
+      
+      txn = new Transaction().add(...instructions);
       console.log(`[API] /api/tx - Transaction built successfully with ${txn.instructions.length} instructions`);
     } catch (error) {
       console.log(`[API] /api/tx - Failed to build transaction:`, error);
@@ -235,8 +273,10 @@ export default async function handler(
 
     console.log(`[API] /api/tx - Final check values:`, {
       user: user.toBase58(),
-      ata: ata.toBase58(),
-      mint: mint.publicKey.toBase58(),
+      mint: mint.toBase58(),
+      senderAta: senderAta.toBase58(),
+      receiverAta: receiverAta.toBase58(),
+      amount: amount,
       nonce: nonce
     });
 
@@ -248,7 +288,7 @@ export default async function handler(
       console.log(`[API] /api/tx - Fee payer set: ${txn.feePayer.toBase58()}`);
 
       console.log(`[API] /api/tx - Partially signing transaction`);
-      txn.partialSign(mint, wallet, nonceAccountAuth);
+      txn.partialSign(wallet, nonceAccountAuth);
       console.log(`[API] /api/tx - Transaction signed successfully`);
 
       console.log(`[API] /api/tx - Serializing transaction`);

@@ -23,11 +23,11 @@ const MEMO_PROGRAM_ID = new PublicKey("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfc
 type Data = {
   result: "success" | "error";
   message:
-    | {
-        tx: string;
-        signatures: ({ key: string; signature: string | null } | null)[];
-      }
-    | { error: Error };
+  | {
+    tx: string;
+    signatures: ({ key: string; signature: string | null } | null)[];
+  }
+  | { error: Error };
 };
 
 export default async function handler(
@@ -35,7 +35,7 @@ export default async function handler(
   res: NextApiResponse<Data>
 ) {
   console.log(`[API] /api/tx - Request started - Method: ${req.method}`);
-  
+
   try {
     // Only allow POST requests
     if (req.method !== 'POST') {
@@ -47,16 +47,16 @@ export default async function handler(
     }
 
     console.log(`[API] /api/tx - Request body:`, req.body);
-    const { 
-      senderAddress, 
-      receiverAddress, 
-      tokenMint, 
-      amount, 
-      transactionFee, 
-      transactionFeeAddress, 
-      narration 
+    const {
+      senderAddress,
+      receiverAddress,
+      tokenMint,
+      amount,
+      transactionFee,
+      transactionFeeAddress,
+      narration
     } = req.body;
-    
+
     // Validate required parameters
     if (!senderAddress || typeof senderAddress !== 'string') {
       return res.status(400).json({
@@ -116,18 +116,18 @@ export default async function handler(
     let receiver: PublicKey;
     let mint: PublicKey;
     let feeReceiver: PublicKey | null = null;
-    
+
     try {
       sender = new PublicKey(senderAddress);
       receiver = new PublicKey(receiverAddress);
       mint = new PublicKey(tokenMint);
-      
+
       if (transactionFeeAddress) {
         feeReceiver = new PublicKey(transactionFeeAddress);
       }
     } catch (error) {
       return res.status(400).json({
-        result: "error", 
+        result: "error",
         message: { error: new Error("Invalid public key format") }
       });
     }
@@ -140,7 +140,7 @@ export default async function handler(
         message: { error: new Error("Wallet environment variable not configured") }
       });
     }
-    
+
     let relayerWallet: Keypair;
     try {
       relayerWallet = Keypair.fromSecretKey(base58.decode(process.env.WALLET));
@@ -155,11 +155,11 @@ export default async function handler(
 
     console.log(`[API] /api/tx - Creating connection to devnet`);
     const connection = new Connection(clusterApiUrl("devnet"), "finalized");
-    
+
     console.log(`[API] /api/tx - Getting associated token addresses`);
     const senderAta = await getAssociatedTokenAddress(mint, sender);
     const receiverAta = await getAssociatedTokenAddress(mint, receiver);
-    
+
     // Get fee receiver ATA if transaction fee is specified
     let feeReceiverAta: PublicKey | null = null;
     if (feeReceiver && transactionFee) {
@@ -250,14 +250,14 @@ export default async function handler(
 
     // Create transaction
     const transaction = new Transaction().add(...instructions);
-    
+
     // Get recent blockhash
     const { blockhash } = await connection.getLatestBlockhash('finalized');
     transaction.recentBlockhash = blockhash;
-    
+
     // IMPORTANT: Set relayer as fee payer (this is what makes relayer pay gas)
     transaction.feePayer = relayerWallet.publicKey;
-    
+
     console.log(`[API] /api/tx - Fee payer set to relayer: ${relayerWallet.publicKey.toBase58()}`);
     console.log(`[API] /api/tx - Transaction instructions count: ${instructions.length}`);
 
@@ -293,12 +293,12 @@ export default async function handler(
         signatures: signatures,
       },
     });
-    
+
   } catch (error) {
     console.log(`[API] /api/tx - Error:`, error);
-    res.status(500).json({ 
-      result: "error", 
-      message: { error: error as Error } 
+    res.status(500).json({
+      result: "error",
+      message: { error: error as Error }
     });
   }
 }

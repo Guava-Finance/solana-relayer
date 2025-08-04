@@ -16,6 +16,7 @@ import {
 } from "@solana/web3.js";
 import base58 from "bs58";
 import type { NextApiRequest, NextApiResponse } from "next";
+import { createEncryptionMiddleware } from "../../utils/encrytption"; // Adjust path as needed
 
 // Memo Program ID on Solana
 const MEMO_PROGRAM_ID = new PublicKey("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr");
@@ -30,11 +31,18 @@ type Data = {
   | { error: Error };
 };
 
+// Initialize encryption middleware
+const encryptionMiddleware = createEncryptionMiddleware(
+  process.env.AES_ENCRYPTION_KEY || 'default-key',
+  process.env.AES_ENCRYPTION_IV || 'default-iv-16b!!' // Must be exactly 16 bytes
+);
+
 export default async function handler(
   req: NextApiRequest,
   res: NextApiResponse<Data>
 ) {
   console.log(`[API] /api/tx - Request started - Method: ${req.method}`);
+  console.log(`[API] /api/tx - Headers:`, req.headers);
 
   try {
     // Only allow POST requests
@@ -46,7 +54,10 @@ export default async function handler(
       });
     }
 
-    console.log(`[API] /api/tx - Request body:`, req.body);
+    // Process request data (decrypt if IS_ENCRYPTED header is set)
+    const processedBody = encryptionMiddleware.processRequest(req.body, req.headers);
+    console.log(`[API] /api/tx - Processed request body:`, processedBody);
+
     const {
       senderAddress,
       receiverAddress,
@@ -55,60 +66,81 @@ export default async function handler(
       transactionFee,
       transactionFeeAddress,
       narration
-    } = req.body;
+    } = processedBody;
 
     // Validate required parameters
     if (!senderAddress || typeof senderAddress !== 'string') {
-      return res.status(400).json({
-        result: "error",
+      const errorResponse = {
+        result: "error" as const,
         message: { error: new Error("Sender address is required and must be a string") }
-      });
+      };
+      return res.status(400).json(
+        encryptionMiddleware.processResponse(errorResponse, req.headers)
+      );
     }
 
     if (!receiverAddress || typeof receiverAddress !== 'string') {
-      return res.status(400).json({
-        result: "error",
+      const errorResponse = {
+        result: "error" as const,
         message: { error: new Error("Receiver address is required and must be a string") }
-      });
+      };
+      return res.status(400).json(
+        encryptionMiddleware.processResponse(errorResponse, req.headers)
+      );
     }
 
     if (!tokenMint || typeof tokenMint !== 'string') {
-      return res.status(400).json({
-        result: "error",
+      const errorResponse = {
+        result: "error" as const,
         message: { error: new Error("Token mint address is required and must be a string") }
-      });
+      };
+      return res.status(400).json(
+        encryptionMiddleware.processResponse(errorResponse, req.headers)
+      );
     }
 
     if (!amount || typeof amount !== 'number' || amount <= 0) {
-      return res.status(400).json({
-        result: "error",
+      const errorResponse = {
+        result: "error" as const,
         message: { error: new Error("Amount is required and must be a positive number") }
-      });
+      };
+      return res.status(400).json(
+        encryptionMiddleware.processResponse(errorResponse, req.headers)
+      );
     }
 
     // Validate transaction fee parameters (optional)
     if (transactionFee !== undefined && transactionFee !== null) {
       if (typeof transactionFee !== 'number' || transactionFee <= 0) {
-        return res.status(400).json({
-          result: "error",
+        const errorResponse = {
+          result: "error" as const,
           message: { error: new Error("Transaction fee must be a positive number") }
-        });
+        };
+        return res.status(400).json(
+          encryptionMiddleware.processResponse(errorResponse, req.headers)
+        );
       }
 
       if (!transactionFeeAddress || typeof transactionFeeAddress !== 'string') {
-        return res.status(400).json({
-          result: "error",
+        const errorResponse = {
+          result: "error" as const,
           message: { error: new Error("Transaction fee address is required when transaction fee is provided") }
-        });
+        };
+        return res.status(400).json(
+          encryptionMiddleware.processResponse(errorResponse, req.headers)
+        );
       }
     }
 
     // Validate narration (optional)
     if (narration !== undefined && narration !== null && typeof narration !== 'string') {
-      return res.status(400).json({
-        result: "error",
+      const errorResponse = {
+        result: "error" as const,
         message: { error: new Error("Narration must be a string") }
-      });
+      };
+      return res.status(400).json(
+        encryptionMiddleware.processResponse(errorResponse, req.headers)
+      );
     }
 
     // Validate public key formats
@@ -126,19 +158,25 @@ export default async function handler(
         feeReceiver = new PublicKey(transactionFeeAddress);
       }
     } catch (error) {
-      return res.status(400).json({
-        result: "error",
+      const errorResponse = {
+        result: "error" as const,
         message: { error: new Error("Invalid public key format") }
-      });
+      };
+      return res.status(400).json(
+        encryptionMiddleware.processResponse(errorResponse, req.headers)
+      );
     }
 
     console.log(`[API] /api/tx - Loading relayer wallet`);
     if (!process.env.WALLET) {
       console.log(`[API] /api/tx - WALLET environment variable not found`);
-      return res.status(500).json({
-        result: "error",
+      const errorResponse = {
+        result: "error" as const,
         message: { error: new Error("Wallet environment variable not configured") }
-      });
+      };
+      return res.status(500).json(
+        encryptionMiddleware.processResponse(errorResponse, req.headers)
+      );
     }
 
     let relayerWallet: Keypair;
@@ -147,10 +185,13 @@ export default async function handler(
       console.log(`[API] /api/tx - Relayer wallet loaded: ${relayerWallet.publicKey.toBase58()}`);
     } catch (error) {
       console.log(`[API] /api/tx - Failed to load relayer wallet:`, error);
-      return res.status(500).json({
-        result: "error",
+      const errorResponse = {
+        result: "error" as const,
         message: { error: new Error("Invalid relayer wallet configuration") }
-      });
+      };
+      return res.status(500).json(
+        encryptionMiddleware.processResponse(errorResponse, req.headers)
+      );
     }
 
     console.log(`[API] /api/tx - Creating connection to devnet`);
@@ -286,19 +327,29 @@ export default async function handler(
       console.log(`[API] /api/tx - Memo: "${narration}"`);
     }
 
-    res.json({
-      result: "success",
+    const successResponse = {
+      result: "success" as const,
       message: {
         tx: serializedTx,
         signatures: signatures,
       },
-    });
+    };
+
+    // Process response data (encrypt if IS_ENCRYPTED header is set)
+    const processedResponse = encryptionMiddleware.processResponse(successResponse, req.headers);
+
+    res.json(processedResponse);
 
   } catch (error) {
     console.log(`[API] /api/tx - Error:`, error);
-    res.status(500).json({
-      result: "error",
+
+    const errorResponse = {
+      result: "error" as const,
       message: { error: error as Error }
-    });
+    };
+
+    const processedErrorResponse = encryptionMiddleware.processResponse(errorResponse, req.headers);
+
+    res.status(500).json(processedErrorResponse);
   }
 }

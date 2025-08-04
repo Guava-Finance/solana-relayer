@@ -33,15 +33,25 @@ const createDurableNonce = async (feePayer: Keypair) => {
     })
   );
 
-  console.log(
-    `nonce txhash: ${await connection.sendTransaction(
-      tx,
-      [feePayer, nonceAccount],
-      {
-        preflightCommitment: "finalized",
-      }
-    )}`
+  const txhash = await connection.sendTransaction(
+    tx,
+    [feePayer, nonceAccount],
+    {
+      preflightCommitment: "finalized",
+    }
   );
+  console.log(`nonce txhash: ${txhash}`);
+  
+  // Try to confirm the transaction, but don't fail if it times out
+  console.log(`Waiting for nonce account creation to be confirmed...`);
+  try {
+    const confirmation = await connection.confirmTransaction(txhash, "finalized");
+    console.log(`Nonce account creation confirmed:`, confirmation);
+  } catch (error) {
+    console.log(`Nonce account creation confirmation timed out, but transaction was sent: ${txhash}`);
+    console.log(`You can check the transaction status at: https://solscan.io/tx/${txhash}`);
+  }
+  
   return { nonceAccount, nonceAccountAuth };
 };
 

@@ -33,7 +33,7 @@ export const WalletContextProvider: FC<any> = ({ children }) => {
   //     typeof window !== "undefined" && process.env.NEXT_PUBLIC_ENV === "dev"
   //       ? (process.env.NEXT_PUBLIC_ALCHEMY as string)
   //       : (process.env.NEXT_PUBLIC_ALCHEMY as string);
-  const network = process.env.NEXT_PUBLIC_ALCHEMY;
+  const network = process.env.NEXT_PUBLIC_ALCHEMY || "https://api.devnet.solana.com";
   console.log(network);
   const endpoint = useMemo(() => network, [network]);
   const wallets = useMemo(

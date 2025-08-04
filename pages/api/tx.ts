@@ -11,9 +11,14 @@ import {
   Keypair,
   PublicKey,
   Transaction,
+  TransactionInstruction,
+  SystemProgram,
 } from "@solana/web3.js";
 import base58 from "bs58";
 import type { NextApiRequest, NextApiResponse } from "next";
+
+// Memo Program ID on Solana
+const MEMO_PROGRAM_ID = new PublicKey("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr");
 
 type Data = {
   result: "success" | "error";
@@ -42,7 +47,15 @@ export default async function handler(
     }
 
     console.log(`[API] /api/tx - Request body:`, req.body);
-    const { senderAddress, receiverAddress, tokenMint, amount } = req.body;
+    const { 
+      senderAddress, 
+      receiverAddress, 
+      tokenMint, 
+      amount, 
+      transactionFee, 
+      transactionFeeAddress, 
+      narration 
+    } = req.body;
     
     // Validate required parameters
     if (!senderAddress || typeof senderAddress !== 'string') {
@@ -73,15 +86,45 @@ export default async function handler(
       });
     }
 
+    // Validate transaction fee parameters (optional)
+    if (transactionFee !== undefined && transactionFee !== null) {
+      if (typeof transactionFee !== 'number' || transactionFee <= 0) {
+        return res.status(400).json({
+          result: "error",
+          message: { error: new Error("Transaction fee must be a positive number") }
+        });
+      }
+
+      if (!transactionFeeAddress || typeof transactionFeeAddress !== 'string') {
+        return res.status(400).json({
+          result: "error",
+          message: { error: new Error("Transaction fee address is required when transaction fee is provided") }
+        });
+      }
+    }
+
+    // Validate narration (optional)
+    if (narration !== undefined && narration !== null && typeof narration !== 'string') {
+      return res.status(400).json({
+        result: "error",
+        message: { error: new Error("Narration must be a string") }
+      });
+    }
+
     // Validate public key formats
     let sender: PublicKey;
     let receiver: PublicKey;
     let mint: PublicKey;
+    let feeReceiver: PublicKey | null = null;
     
     try {
       sender = new PublicKey(senderAddress);
       receiver = new PublicKey(receiverAddress);
       mint = new PublicKey(tokenMint);
+      
+      if (transactionFeeAddress) {
+        feeReceiver = new PublicKey(transactionFeeAddress);
+      }
     } catch (error) {
       return res.status(400).json({
         result: "error", 
@@ -116,6 +159,12 @@ export default async function handler(
     console.log(`[API] /api/tx - Getting associated token addresses`);
     const senderAta = await getAssociatedTokenAddress(mint, sender);
     const receiverAta = await getAssociatedTokenAddress(mint, receiver);
+    
+    // Get fee receiver ATA if transaction fee is specified
+    let feeReceiverAta: PublicKey | null = null;
+    if (feeReceiver && transactionFee) {
+      feeReceiverAta = await getAssociatedTokenAddress(mint, feeReceiver);
+    }
 
     console.log(`[API] /api/tx - Building transaction with relayer as fee payer`);
     const instructions = [];
@@ -148,7 +197,24 @@ export default async function handler(
       );
     }
 
-    // Add transfer instruction (sender authorizes, but relayer pays gas)
+    // Check if fee receiver ATA exists (if transaction fee is specified)
+    if (feeReceiverAta && feeReceiver) {
+      const feeReceiverAccountInfo = await connection.getAccountInfo(feeReceiverAta);
+      if (!feeReceiverAccountInfo) {
+        console.log(`[API] /api/tx - Creating fee receiver ATA (relayer pays)`);
+        instructions.push(
+          createAssociatedTokenAccountInstruction(
+            relayerWallet.publicKey, // RELAYER pays for ATA creation
+            feeReceiverAta,
+            feeReceiver,
+            mint
+          )
+        );
+      }
+    }
+
+    // Add main transfer instruction (sender authorizes, but relayer pays gas)
+    console.log(`[API] /api/tx - Adding main transfer instruction: ${amount} tokens`);
     instructions.push(
       createTransferInstruction(
         senderAta,
@@ -157,6 +223,30 @@ export default async function handler(
         amount
       )
     );
+
+    // Add transaction fee transfer instruction (if specified)
+    if (feeReceiverAta && feeReceiver && transactionFee) {
+      console.log(`[API] /api/tx - Adding transaction fee instruction: ${transactionFee} tokens to ${feeReceiver.toBase58()}`);
+      instructions.push(
+        createTransferInstruction(
+          senderAta,
+          feeReceiverAta,
+          sender, // sender must authorize the fee transfer
+          transactionFee
+        )
+      );
+    }
+
+    // Add memo instruction (if narration is provided)
+    if (narration && narration.trim() !== '') {
+      console.log(`[API] /api/tx - Adding memo instruction: "${narration}"`);
+      const memoInstruction = new TransactionInstruction({
+        keys: [],
+        programId: MEMO_PROGRAM_ID,
+        data: Buffer.from(narration, 'utf8'),
+      });
+      instructions.push(memoInstruction);
+    }
 
     // Create transaction
     const transaction = new Transaction().add(...instructions);
@@ -169,6 +259,7 @@ export default async function handler(
     transaction.feePayer = relayerWallet.publicKey;
     
     console.log(`[API] /api/tx - Fee payer set to relayer: ${relayerWallet.publicKey.toBase58()}`);
+    console.log(`[API] /api/tx - Transaction instructions count: ${instructions.length}`);
 
     // Pre-sign with relayer wallet (for gas payment and ATA creation)
     transaction.partialSign(relayerWallet);
@@ -187,6 +278,13 @@ export default async function handler(
     console.log(`[API] /api/tx - Transaction ready - Relayer will pay gas fees`);
     console.log(`[API] /api/tx - Fee payer: ${transaction.feePayer?.toBase58()}`);
     console.log(`[API] /api/tx - Required signatures:`, signatures.length);
+    console.log(`[API] /api/tx - Main transfer: ${amount} tokens`);
+    if (transactionFee) {
+      console.log(`[API] /api/tx - Transaction fee: ${transactionFee} tokens to ${feeReceiver?.toBase58()}`);
+    }
+    if (narration) {
+      console.log(`[API] /api/tx - Memo: "${narration}"`);
+    }
 
     res.json({
       result: "success",

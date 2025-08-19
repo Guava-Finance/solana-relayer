@@ -51,7 +51,7 @@ export class EncryptionService {
 
     // Encrypt a string
     private encryptString(text: string): string {
-        const cipher = crypto.createCipheriv('aes-256-cbc', this.key, this.iv);
+        const cipher = crypto.createCipheriv('aes-256-cbc', Uint8Array.from(this.key), Uint8Array.from(this.iv));
         let encrypted = cipher.update(text, 'utf8', 'base64');
         encrypted += cipher.final('base64');
         return encrypted;
@@ -60,7 +60,7 @@ export class EncryptionService {
     // Decrypt a string
     private decryptString(encryptedText: string): string {
         try {
-            const decipher = crypto.createDecipheriv('aes-256-cbc', this.key, this.iv);
+            const decipher = crypto.createDecipheriv('aes-256-cbc', Uint8Array.from(this.key), Uint8Array.from(this.iv));
             let decrypted = decipher.update(encryptedText, 'base64', 'utf8');
             decrypted += decipher.final('utf8');
             return decrypted;

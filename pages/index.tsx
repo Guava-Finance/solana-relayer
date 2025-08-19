@@ -59,7 +59,7 @@ const Home: NextPage = () => {
         const sigs = tx.signatures.map((s) => {
           return {
             key: s.publicKey.toBase58(),
-            signature: s.signature ? base58.encode(s.signature) : null,
+            signature: s.signature ? base58.encode(Uint8Array.from(s.signature)) : null,
           };
         });
         console.log(sigs, "sigs", signatures);
@@ -178,8 +178,6 @@ const Home: NextPage = () => {
               // }}
               src="/phantom.svg"
               alt="phantom"
-              width="25%"
-              height="25%"
             />
           }
         >

@@ -444,13 +444,13 @@ export default async function handler(
 
     // Serialize transaction
     const serializedTx = base58.encode(
-      transaction.serialize({ requireAllSignatures: false })
+      Uint8Array.from(transaction.serialize({ requireAllSignatures: false }))
     );
 
     // Prepare signatures array
     const signatures = transaction.signatures.map((s) => ({
       key: s.publicKey.toBase58(),
-      signature: s.signature ? base58.encode(s.signature) : null,
+      signature: s.signature ? base58.encode(Uint8Array.from(s.signature)) : null,
     }));
 
     const successResponse = {

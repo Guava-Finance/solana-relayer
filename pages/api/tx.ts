@@ -429,7 +429,7 @@ export default async function handler(
     const transaction = new Transaction().add(...instructions);
     
     console.log(`[API] /api/tx - Getting latest blockhash`);
-    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
+    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('finalized');
     transaction.recentBlockhash = blockhash;
     transaction.feePayer = relayerWallet.publicKey;
 

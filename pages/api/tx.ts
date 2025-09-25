@@ -172,7 +172,7 @@ function calculateTransactionCost(priorityFee: number, computeUnits: number): nu
   // Priority fee calculation: (priorityFee in microlamports * computeUnits) / 1,000,000
   const priorityFeeCost = Math.ceil((priorityFee * computeUnits) / 1_000_000);
   
-  return baseFee + priorityFeeCost + 50;
+  return baseFee + priorityFeeCost;
 }
 
 export default async function handler(

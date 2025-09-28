@@ -11,6 +11,7 @@ import {
     Transaction,
     sendAndConfirmTransaction,
 } from "@solana/web3.js";
+import nacl from "tweetnacl";
 import base58 from "bs58";
 import type { NextApiRequest, NextApiResponse } from "next";
 import { validateSecurity, createSecurityErrorResponse } from "../../utils/security";
@@ -75,7 +76,7 @@ async function createAtaHandler(
             throw error;
         }
         
-        const { ownerAddress, tokenMint } = processedBody;
+        const { ownerAddress, tokenMint, userSignature, message } = processedBody;
 
         // Apply rate limiting based on owner address (sender)
         if (!(await rateLimiter.checkWithSender(req, res, ownerAddress))) {
@@ -83,6 +84,63 @@ async function createAtaHandler(
         }
 
         console.log(`[API] /api/create-ata - Processing request for owner: ${ownerAddress}, mint: ${tokenMint}`);
+
+        // ANTI-GRIEFING: Require user signature to prevent rent extraction attacks
+        if (!userSignature || !message) {
+            console.log(`[API] /api/create-ata - Missing user signature or message for owner: ${ownerAddress}`);
+            return res.status(400).json(
+                encryptionMiddleware.processResponse({
+                    result: "error",
+                    message: { error: new Error("User signature required to create ATA. This prevents rent extraction attacks.") }
+                }, req.headers)
+            );
+        }
+
+        // Verify the user signature
+        try {
+            const messageBytes = new TextEncoder().encode(message);
+            const signatureBytes = base58.decode(userSignature);
+            const ownerPublicKey = new PublicKey(ownerAddress);
+            
+            const isValidSignature = nacl.sign.detached.verify(
+                messageBytes,
+                signatureBytes,
+                ownerPublicKey.toBytes()
+            );
+            
+            if (!isValidSignature) {
+                console.log(`[API] /api/create-ata - Invalid signature for owner: ${ownerAddress}`);
+                return res.status(400).json(
+                    encryptionMiddleware.processResponse({
+                        result: "error",
+                        message: { error: new Error("Invalid user signature. Cannot create ATA without valid authorization.") }
+                    }, req.headers)
+                );
+            }
+            
+            // Verify the message contains the expected content to prevent replay attacks
+            const expectedMessage = `Create ATA for ${ownerAddress} with mint ${tokenMint}`;
+            if (message !== expectedMessage) {
+                console.log(`[API] /api/create-ata - Invalid message content for owner: ${ownerAddress}`);
+                return res.status(400).json(
+                    encryptionMiddleware.processResponse({
+                        result: "error",
+                        message: { error: new Error("Invalid message content. Message must match expected format.") }
+                    }, req.headers)
+                );
+            }
+            
+            console.log(`[API] /api/create-ata - Valid signature verified for owner: ${ownerAddress}`);
+            
+        } catch (error) {
+            console.log(`[API] /api/create-ata - Signature verification failed for owner: ${ownerAddress}`, error);
+            return res.status(400).json(
+                encryptionMiddleware.processResponse({
+                    result: "error",
+                    message: { error: new Error("Signature verification failed. Cannot create ATA.") }
+                }, req.headers)
+            );
+        }
 
         // Validate required parameters
         if (!ownerAddress || typeof ownerAddress !== 'string') {

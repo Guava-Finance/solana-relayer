@@ -372,18 +372,16 @@ async function txHandler(
       })
     );
 
-    // Check and create ATAs if needed
+    // ANTI-GRIEFING: Check and create ATAs if needed (with restrictions)
     console.log(`[API] /api/tx - Checking sender ATA: ${senderAta.toBase58()}`);
     const senderAccountInfo = await connection.getAccountInfo(senderAta);
     if (!senderAccountInfo) {
-      console.log(`[API] /api/tx - Sender ATA does not exist, adding creation instruction`);
-      instructions.push(
-        createAssociatedTokenAccountInstruction(
-          relayerWallet.publicKey,
-          senderAta,
-          sender,
-          mint
-        )
+      console.log(`[API] /api/tx - SECURITY WARNING: Sender ATA does not exist. This could be a griefing attack.`);
+      return res.status(400).json(
+        encryptionMiddleware.processResponse({
+          result: "error",
+          message: { error: new Error("Sender ATA does not exist. Please create it first using the create-ata endpoint with proper authorization.") }
+        }, req.headers)
       );
     }
 
@@ -391,6 +389,7 @@ async function txHandler(
     const receiverAccountInfo = await connection.getAccountInfo(receiverAta);
     if (!receiverAccountInfo) {
       console.log(`[API] /api/tx - Receiver ATA does not exist, adding creation instruction`);
+      // Only create receiver ATA (this is expected for legitimate transfers)
       instructions.push(
         createAssociatedTokenAccountInstruction(
           relayerWallet.publicKey,

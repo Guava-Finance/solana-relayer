@@ -27,6 +27,26 @@ interface RateLimitConfig {
 interface RequestRecord {
   count: number;
   resetTime: number;
+  violations: number; // Track number of rate limit violations
+  lastViolationTime: number; // When the last violation occurred
+}
+
+/**
+ * Progressive penalty timeouts (in milliseconds)
+ */
+const PROGRESSIVE_PENALTIES = [
+  1 * 60 * 1000,      // 1st violation: 1 minute
+  5 * 60 * 1000,      // 2nd violation: 5 minutes  
+  15 * 60 * 1000,     // 3rd violation: 15 minutes
+  60 * 60 * 1000,     // 4th+ violations: 1 hour
+];
+
+/**
+ * Get progressive penalty timeout based on violation count
+ */
+function getProgressivePenalty(violations: number): number {
+  const index = Math.min(violations - 1, PROGRESSIVE_PENALTIES.length - 1);
+  return PROGRESSIVE_PENALTIES[index];
 }
 
 /**
@@ -72,21 +92,70 @@ export function createRateLimiter(config: RateLimitConfig) {
       
       console.log(`[RateLimit] Current record:`, record);
       
-      // Reset if window has expired or no record exists
-      if (!record || now >= record.resetTime) {
+      // Initialize record if it doesn't exist
+      if (!record) {
         record = {
           count: 0,
           resetTime: now + windowMs,
+          violations: 0,
+          lastViolationTime: 0,
         };
-        console.log(`[RateLimit] Reset/new window for key: ${key}`);
+        console.log(`[RateLimit] New record created for key: ${key}`);
+      }
+
+      // Check if user is currently in a progressive penalty timeout
+      if (record.violations > 0 && record.lastViolationTime > 0) {
+        const penaltyDuration = getProgressivePenalty(record.violations);
+        const penaltyEndTime = record.lastViolationTime + penaltyDuration;
+        
+        if (now < penaltyEndTime) {
+          const remainingPenaltyMs = penaltyEndTime - now;
+          const remainingMinutes = Math.ceil(remainingPenaltyMs / (60 * 1000));
+          
+          console.log(`[RateLimit] User in progressive penalty timeout. Violation #${record.violations}, ${remainingMinutes} minutes remaining`);
+          
+          return {
+            allowed: false,
+            resetTime: penaltyEndTime,
+            remaining: 0,
+          };
+        } else {
+          // Penalty period has expired, reset violations if enough time has passed
+          const violationResetTime = 24 * 60 * 60 * 1000; // Reset violations after 24 hours
+          if (now - record.lastViolationTime > violationResetTime) {
+            record.violations = 0;
+            record.lastViolationTime = 0;
+            console.log(`[RateLimit] Violations reset for key: ${key} after 24 hours`);
+          }
+        }
+      }
+
+      // Reset count if window has expired
+      if (now >= record.resetTime) {
+        record.count = 0;
+        record.resetTime = now + windowMs;
+        console.log(`[RateLimit] Rate limit window reset for key: ${key}`);
       }
       
       // Check if limit exceeded
       if (record.count >= maxRequests) {
+        // Increment violation count and set violation time
+        record.violations++;
+        record.lastViolationTime = now;
+        
+        const penaltyDuration = getProgressivePenalty(record.violations);
+        const penaltyMinutes = penaltyDuration / (60 * 1000);
+        
         console.log(`[RateLimit] Rate limit exceeded for key: ${key}, count: ${record.count}, max: ${maxRequests}`);
+        console.log(`[RateLimit] Progressive penalty applied: Violation #${record.violations}, timeout: ${penaltyMinutes} minutes`);
+        
+        // Save the updated record with violation info
+        const ttlSeconds = Math.ceil(penaltyDuration / 1000);
+        await redis.setEx(key, ttlSeconds, JSON.stringify(record));
+        
         return {
           allowed: false,
-          resetTime: record.resetTime,
+          resetTime: now + penaltyDuration,
           remaining: 0,
         };
       }
@@ -134,11 +203,26 @@ export function createRateLimiter(config: RateLimitConfig) {
       res.setHeader('X-RateLimit-Reset', Math.ceil((result.resetTime || 0) / 1000));
       
       if (!result.allowed) {
+        const retryAfterSeconds = Math.ceil(((result.resetTime || 0) - Date.now()) / 1000);
+        const retryAfterMinutes = Math.ceil(retryAfterSeconds / 60);
+        
         console.log(`[RateLimit] Request blocked for sender: ${senderAddress}`);
+        
+        // Enhanced error message with progressive penalty info
+        let errorMessage = message;
+        if (retryAfterMinutes >= 60) {
+          errorMessage = `Rate limit exceeded. Please wait ${Math.ceil(retryAfterMinutes / 60)} hour(s) before trying again.`;
+        } else if (retryAfterMinutes > 1) {
+          errorMessage = `Rate limit exceeded. Please wait ${retryAfterMinutes} minutes before trying again.`;
+        } else {
+          errorMessage = `Rate limit exceeded. Please wait ${retryAfterSeconds} seconds before trying again.`;
+        }
+        
         res.status(429).json({
           result: "error",
-          message: { error: new Error(message) },
-          retryAfter: Math.ceil(((result.resetTime || 0) - Date.now()) / 1000),
+          message: { error: new Error(errorMessage) },
+          retryAfter: retryAfterSeconds,
+          retryAfterMinutes: retryAfterMinutes,
         });
         return false;
       }
@@ -159,11 +243,26 @@ export function createRateLimiter(config: RateLimitConfig) {
         res.setHeader('X-RateLimit-Reset', Math.ceil((result.resetTime || 0) / 1000));
         
         if (!result.allowed) {
+          const retryAfterSeconds = Math.ceil(((result.resetTime || 0) - Date.now()) / 1000);
+          const retryAfterMinutes = Math.ceil(retryAfterSeconds / 60);
+          
           console.log(`[RateLimit] Request blocked for ${getRateLimitKey(req)}`);
+          
+          // Enhanced error message with progressive penalty info
+          let errorMessage = message;
+          if (retryAfterMinutes >= 60) {
+            errorMessage = `Rate limit exceeded. Please wait ${Math.ceil(retryAfterMinutes / 60)} hour(s) before trying again.`;
+          } else if (retryAfterMinutes > 1) {
+            errorMessage = `Rate limit exceeded. Please wait ${retryAfterMinutes} minutes before trying again.`;
+          } else {
+            errorMessage = `Rate limit exceeded. Please wait ${retryAfterSeconds} seconds before trying again.`;
+          }
+          
           return res.status(429).json({
             result: "error",
-            message: { error: new Error(message) },
-            retryAfter: Math.ceil(((result.resetTime || 0) - Date.now()) / 1000),
+            message: { error: new Error(errorMessage) },
+            retryAfter: retryAfterSeconds,
+            retryAfterMinutes: retryAfterMinutes,
           });
         }
         

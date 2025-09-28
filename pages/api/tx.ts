@@ -20,6 +20,7 @@ import type { NextApiRequest, NextApiResponse } from "next";
 import { createEncryptionMiddleware } from "../../utils/encrytption";
 import { validateSecurity, createSecurityErrorResponse } from "../../utils/security";
 import { createRateLimiter, RateLimitConfigs } from "../../utils/rateLimiter";
+import { TransactionMonitor } from "../../utils/transactionMonitoring";
 
 const MEMO_PROGRAM_ID = new PublicKey("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr");
 
@@ -234,6 +235,49 @@ async function txHandler(
     // Convert amount and fee to number if they're strings
     const parsedAmount = typeof amount === 'string' ? parseFloat(amount) : amount;
     const parsedTransactionFee = typeof transactionFee === 'string' ? parseFloat(transactionFee) : transactionFee;
+
+    // Transaction monitoring and blacklist check
+    console.log(`[API] /api/tx - Analyzing transaction for suspicious patterns`);
+    const transactionAnalysis = await TransactionMonitor.analyzeTransaction(
+      senderAddress,
+      receiverAddress,
+      parsedAmount,
+      tokenMint
+    );
+
+    if (!transactionAnalysis.allowed) {
+      console.log(`[API] /api/tx - Transaction blocked by monitoring system:`, {
+        riskScore: transactionAnalysis.riskScore,
+        flags: transactionAnalysis.flags
+      });
+      
+      // Auto-blacklist high-risk addresses
+      if (transactionAnalysis.riskScore >= 100) {
+        console.log(`[API] /api/tx - Auto-blacklisting high-risk sender: ${senderAddress}`);
+        await TransactionMonitor.blacklistAddress(
+          senderAddress, 
+          `Auto-blacklisted: Risk score ${transactionAnalysis.riskScore}, Flags: ${transactionAnalysis.flags.join(', ')}`
+        );
+      }
+      
+      return res.status(403).json(encryptionMiddleware.processResponse({
+        result: "error",
+        message: { 
+          error: new Error(`Transaction blocked: ${transactionAnalysis.flags.join(', ')}`) 
+        }
+      }, req.headers));
+    }
+
+    // Log transaction analysis for monitoring
+    if (transactionAnalysis.riskScore > 50) {
+      console.log(`[API] /api/tx - High-risk transaction allowed:`, {
+        sender: senderAddress,
+        receiver: receiverAddress,
+        amount: parsedAmount,
+        riskScore: transactionAnalysis.riskScore,
+        flags: transactionAnalysis.flags
+      });
+    }
 
     // Validation
     if (!senderAddress || typeof senderAddress !== 'string') {

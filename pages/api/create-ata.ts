@@ -17,6 +17,7 @@ import type { NextApiRequest, NextApiResponse } from "next";
 import { validateSecurity, createSecurityErrorResponse } from "../../utils/security";
 import { createEncryptionMiddleware } from "../../utils/encrytption";
 import { createRateLimiter, RateLimitConfigs } from "../../utils/rateLimiter";
+import { TransactionMonitor } from "../../utils/transactionMonitoring";
 
 type Data = {
     result: "success" | "error";
@@ -81,6 +82,32 @@ async function createAtaHandler(
         // Apply rate limiting based on owner address (sender)
         if (!(await rateLimiter.checkWithSender(req, res, ownerAddress))) {
             return; // Rate limit exceeded, response already sent
+        }
+
+        // Check if owner address is blacklisted
+        console.log(`[API] /api/create-ata - Checking blacklist for owner: ${ownerAddress}`);
+        const blacklistCheck = await TransactionMonitor.analyzeTransaction(
+            ownerAddress,
+            ownerAddress, // For ATA creation, sender and receiver are the same
+            0, // No amount for ATA creation
+            tokenMint
+        );
+
+        if (!blacklistCheck.allowed) {
+            console.log(`[API] /api/create-ata - ATA creation blocked for blacklisted address:`, {
+                owner: ownerAddress,
+                riskScore: blacklistCheck.riskScore,
+                flags: blacklistCheck.flags
+            });
+            
+            return res.status(403).json(
+                encryptionMiddleware.processResponse({
+                    result: "error",
+                    message: { 
+                        error: new Error(`ATA creation blocked: ${blacklistCheck.flags.join(', ')}`) 
+                    }
+                }, req.headers)
+            );
         }
 
         console.log(`[API] /api/create-ata - Processing request for owner: ${ownerAddress}, mint: ${tokenMint}`);

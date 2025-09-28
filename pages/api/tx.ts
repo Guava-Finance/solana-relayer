@@ -18,6 +18,8 @@ import {
 import base58 from "bs58";
 import type { NextApiRequest, NextApiResponse } from "next";
 import { createEncryptionMiddleware } from "../../utils/encrytption";
+import { validateSecurity, createSecurityErrorResponse } from "../../utils/security";
+import { createRateLimiter, RateLimitConfigs } from "../../utils/rateLimiter";
 
 const MEMO_PROGRAM_ID = new PublicKey("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr");
 
@@ -55,6 +57,8 @@ const encryptionMiddleware = createEncryptionMiddleware(
   process.env.AES_ENCRYPTION_KEY || 'default-key',
   process.env.AES_ENCRYPTION_IV || 'default-iv-16b!!'
 );
+
+const rateLimiter = createRateLimiter(RateLimitConfigs.TRANSACTION);
 
 /**
  * Detect network congestion based on recent block production and fee levels
@@ -175,7 +179,7 @@ function calculateTransactionCost(priorityFee: number, computeUnits: number): nu
   return baseFee + priorityFeeCost;
 }
 
-export default async function handler(
+async function txHandler(
   req: NextApiRequest,
   res: NextApiResponse<Data>
 ) {
@@ -190,8 +194,27 @@ export default async function handler(
       });
     }
 
-    const processedBody = encryptionMiddleware.processRequest(req.body, req.headers);
-    console.log(`[API] /api/tx - Processed request body:`, processedBody);
+    // Security validation
+    const securityValidation = validateSecurity(req);
+    if (!securityValidation.isValid) {
+      console.log(`[API] /api/tx - Security validation failed: ${securityValidation.error}`);
+      return res.status(401).json(createSecurityErrorResponse(securityValidation.error!));
+    }
+
+    let processedBody;
+    try {
+      processedBody = encryptionMiddleware.processRequest(req.body, req.headers);
+      console.log(`[API] /api/tx - Processed request body:`, processedBody);
+    } catch (error) {
+      if (error instanceof Error && error.message === 'Encryption failed') {
+        console.log(`[API] /api/tx - Encryption failed during request processing`);
+        return res.status(400).json({
+          result: "error",
+          message: { error: new Error("Encryption failed") }
+        });
+      }
+      throw error;
+    }
 
     const {
       senderAddress,
@@ -202,6 +225,11 @@ export default async function handler(
       transactionFeeAddress,
       narration
     } = processedBody;
+
+    // Apply rate limiting based on sender address
+    if (!rateLimiter.checkWithSender(req, res, senderAddress)) {
+      return; // Rate limit exceeded, response already sent
+    }
 
     // Convert amount and fee to number if they're strings
     const parsedAmount = typeof amount === 'string' ? parseFloat(amount) : amount;
@@ -508,3 +536,6 @@ export default async function handler(
     );
   }
 }
+
+// Export handler without automatic rate limiting (we'll do it manually after processing)
+export default txHandler;

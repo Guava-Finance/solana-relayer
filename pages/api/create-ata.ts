@@ -13,6 +13,9 @@ import {
 } from "@solana/web3.js";
 import base58 from "bs58";
 import type { NextApiRequest, NextApiResponse } from "next";
+import { validateSecurity, createSecurityErrorResponse } from "../../utils/security";
+import { createEncryptionMiddleware } from "../../utils/encrytption";
+import { createRateLimiter, RateLimitConfigs } from "../../utils/rateLimiter";
 
 type Data = {
     result: "success" | "error";
@@ -25,7 +28,14 @@ type Data = {
     | { error: Error };
 };
 
-export default async function handler(
+const encryptionMiddleware = createEncryptionMiddleware(
+    process.env.AES_ENCRYPTION_KEY || 'default-key',
+    process.env.AES_ENCRYPTION_IV || 'default-iv-16b!!'
+);
+
+const rateLimiter = createRateLimiter(RateLimitConfigs.ACCOUNT_CREATION);
+
+async function createAtaHandler(
     req: NextApiRequest,
     res: NextApiResponse<Data>
 ) {
@@ -41,8 +51,36 @@ export default async function handler(
             });
         }
 
+        // Security validation
+        const securityValidation = validateSecurity(req);
+        if (!securityValidation.isValid) {
+            console.log(`[API] /api/create-ata - Security validation failed: ${securityValidation.error}`);
+            return res.status(401).json(createSecurityErrorResponse(securityValidation.error!));
+        }
+
         console.log(`[API] /api/create-ata - Request body:`, req.body);
-        const { ownerAddress, tokenMint } = req.body;
+        
+        let processedBody;
+        try {
+            processedBody = encryptionMiddleware.processRequest(req.body, req.headers);
+            console.log(`[API] /api/create-ata - Processed request body:`, processedBody);
+        } catch (error) {
+            if (error instanceof Error && error.message === 'Encryption failed') {
+                console.log(`[API] /api/create-ata - Encryption failed during request processing`);
+                return res.status(400).json({
+                    result: "error",
+                    message: { error: new Error("Encryption failed") }
+                });
+            }
+            throw error;
+        }
+        
+        const { ownerAddress, tokenMint } = processedBody;
+
+        // Apply rate limiting based on owner address (sender)
+        if (!rateLimiter.checkWithSender(req, res, ownerAddress)) {
+            return; // Rate limit exceeded, response already sent
+        }
 
         // Validate required parameters
         if (!ownerAddress || typeof ownerAddress !== 'string') {
@@ -108,13 +146,15 @@ export default async function handler(
 
         if (accountInfo) {
             console.log(`[API] /api/create-ata - ATA already exists for owner: ${owner.toBase58()}`);
-            return res.json({
-                result: "success",
-                message: {
-                    ataAddress: ataAddress.toBase58(),
-                    alreadyExists: true,
-                },
-            });
+            return res.json(
+                encryptionMiddleware.processResponse({
+                    result: "success",
+                    message: {
+                        ataAddress: ataAddress.toBase58(),
+                        alreadyExists: true,
+                    },
+                }, req.headers)
+            );
         }
 
         console.log(`[API] /api/create-ata - ATA does not exist, creating new account`);
@@ -187,14 +227,16 @@ export default async function handler(
         console.log(`[API] /api/create-ata - Owner: ${owner.toBase58()}`);
         console.log(`[API] /api/create-ata - Token mint: ${mint.toBase58()}`);
 
-        res.json({
-            result: "success",
-            message: {
-                ataAddress: ataAddress.toBase58(),
-                txHash: txHash,
-                alreadyExists: false,
-            },
-        });
+        res.json(
+            encryptionMiddleware.processResponse({
+                result: "success",
+                message: {
+                    ataAddress: ataAddress.toBase58(),
+                    txHash: txHash,
+                    alreadyExists: false,
+                },
+            }, req.headers)
+        );
 
     } catch (error) {
         console.log(`[API] /api/create-ata - Error:`, error);
@@ -203,30 +245,41 @@ export default async function handler(
         if (error instanceof Error) {
             // Check for common errors
             if (error.message.includes('0x0')) {
-                return res.status(400).json({
-                    result: "error",
-                    message: { error: new Error("Account already exists") }
-                });
+                return res.status(400).json(
+                    encryptionMiddleware.processResponse({
+                        result: "error",
+                        message: { error: new Error("Account already exists") }
+                    }, req.headers)
+                );
             }
 
             if (error.message.includes('insufficient funds')) {
-                return res.status(500).json({
-                    result: "error",
-                    message: { error: new Error("Relayer has insufficient funds") }
-                });
+                return res.status(500).json(
+                    encryptionMiddleware.processResponse({
+                        result: "error",
+                        message: { error: new Error("Relayer has insufficient funds") }
+                    }, req.headers)
+                );
             }
 
             if (error.message.includes('Invalid mint')) {
-                return res.status(400).json({
-                    result: "error",
-                    message: { error: new Error("Invalid token mint address") }
-                });
+                return res.status(400).json(
+                    encryptionMiddleware.processResponse({
+                        result: "error",
+                        message: { error: new Error("Invalid token mint address") }
+                    }, req.headers)
+                );
             }
         }
 
-        res.status(500).json({
-            result: "error",
-            message: { error: error as Error }
-        });
+        res.status(500).json(
+            encryptionMiddleware.processResponse({
+                result: "error",
+                message: { error: error as Error }
+            }, req.headers)
+        );
     }
 }
+
+// Export handler without automatic rate limiting (we'll do it manually after processing)
+export default createAtaHandler;

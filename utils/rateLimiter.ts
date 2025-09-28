@@ -1,5 +1,20 @@
 import type { NextApiRequest, NextApiResponse } from "next";
-import { kv } from '@vercel/kv';
+import { createClient } from 'redis';
+
+// Create Redis client
+const redis = createClient({
+  url: process.env.REDIS_URL
+});
+
+// Connect to Redis (with error handling)
+let redisConnected = false;
+redis.connect().then(() => {
+  redisConnected = true;
+  console.log('[Redis] Connected successfully');
+}).catch((error) => {
+  console.error('[Redis] Connection failed:', error);
+  redisConnected = false;
+});
 
 interface RateLimitConfig {
   windowMs: number; // Time window in milliseconds
@@ -33,9 +48,27 @@ export function createRateLimiter(config: RateLimitConfig) {
     try {
       console.log(`[RateLimit] Checking rate limit for key: ${key}`);
       
+      if (!redisConnected) {
+        console.log('[RateLimit] Redis not connected, allowing request');
+        return {
+          allowed: true,
+          resetTime: now + windowMs,
+          remaining: maxRequests - 1,
+        };
+      }
+      
       // Get current record from Redis
-      const recordData = await kv.get<RequestRecord>(key);
-      let record = recordData;
+      const recordData = await redis.get(key);
+      let record: RequestRecord | null = null;
+      
+      if (recordData) {
+        try {
+          record = JSON.parse(recordData);
+        } catch (parseError) {
+          console.error('[RateLimit] Failed to parse Redis data:', parseError);
+          record = null;
+        }
+      }
       
       console.log(`[RateLimit] Current record:`, record);
       
@@ -63,7 +96,7 @@ export function createRateLimiter(config: RateLimitConfig) {
       
       // Set with expiration (TTL in seconds)
       const ttlSeconds = Math.ceil((record.resetTime - now) / 1000);
-      await kv.setex(key, ttlSeconds, record);
+      await redis.setEx(key, ttlSeconds, JSON.stringify(record));
       
       console.log(`[RateLimit] Request allowed for key: ${key}, count: ${record.count}/${maxRequests}, TTL: ${ttlSeconds}s`);
       

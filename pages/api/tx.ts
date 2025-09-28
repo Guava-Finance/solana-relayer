@@ -227,7 +227,7 @@ async function txHandler(
     } = processedBody;
 
     // Apply rate limiting based on sender address
-    if (!rateLimiter.checkWithSender(req, res, senderAddress)) {
+    if (!(await rateLimiter.checkWithSender(req, res, senderAddress))) {
       return; // Rate limit exceeded, response already sent
     }
 

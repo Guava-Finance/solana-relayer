@@ -78,9 +78,11 @@ async function createAtaHandler(
         const { ownerAddress, tokenMint } = processedBody;
 
         // Apply rate limiting based on owner address (sender)
-        if (!rateLimiter.checkWithSender(req, res, ownerAddress)) {
+        if (!(await rateLimiter.checkWithSender(req, res, ownerAddress))) {
             return; // Rate limit exceeded, response already sent
         }
+
+        console.log(`[API] /api/create-ata - Processing request for owner: ${ownerAddress}, mint: ${tokenMint}`);
 
         // Validate required parameters
         if (!ownerAddress || typeof ownerAddress !== 'string') {

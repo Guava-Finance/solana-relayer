@@ -43,7 +43,7 @@ async function getNonceAccount(
     const { address } = processedBody;
 
     // Apply rate limiting based on address (sender)
-    if (!rateLimiter.checkWithSender(req, res, address)) {
+    if (!(await rateLimiter.checkWithSender(req, res, address))) {
       return; // Rate limit exceeded, response already sent
     }
 

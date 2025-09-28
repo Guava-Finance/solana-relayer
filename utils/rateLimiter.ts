@@ -1,4 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from "next";
+import { kv } from '@vercel/kv';
 
 interface RateLimitConfig {
   windowMs: number; // Time window in milliseconds
@@ -13,9 +14,6 @@ interface RequestRecord {
   resetTime: number;
 }
 
-// In-memory store for rate limiting (in production, use Redis or similar)
-const requestStore = new Map<string, RequestRecord>();
-
 /**
  * Creates a rate limiting middleware
  */
@@ -28,39 +26,61 @@ export function createRateLimiter(config: RateLimitConfig) {
     skipFailedRequests = false,
   } = config;
 
-  const checkRateLimit = (req: NextApiRequest, senderAddress?: string): { allowed: boolean; resetTime?: number; remaining?: number } => {
-    const key = senderAddress ? `sender:${senderAddress}` : getRateLimitKey(req);
+  const checkRateLimit = async (req: NextApiRequest, senderAddress?: string): Promise<{ allowed: boolean; resetTime?: number; remaining?: number }> => {
+    const key = `ratelimit:${senderAddress ? `sender:${senderAddress}` : getRateLimitKey(req)}`;
     const now = Date.now();
     
-    // Get or create request record
-    let record = requestStore.get(key);
-    
-    // Reset if window has expired
-    if (!record || now >= record.resetTime) {
-      record = {
-        count: 0,
-        resetTime: now + windowMs,
-      };
-    }
-    
-    // Check if limit exceeded
-    if (record.count >= maxRequests) {
+    try {
+      console.log(`[RateLimit] Checking rate limit for key: ${key}`);
+      
+      // Get current record from Redis
+      const recordData = await kv.get<RequestRecord>(key);
+      let record = recordData;
+      
+      console.log(`[RateLimit] Current record:`, record);
+      
+      // Reset if window has expired or no record exists
+      if (!record || now >= record.resetTime) {
+        record = {
+          count: 0,
+          resetTime: now + windowMs,
+        };
+        console.log(`[RateLimit] Reset/new window for key: ${key}`);
+      }
+      
+      // Check if limit exceeded
+      if (record.count >= maxRequests) {
+        console.log(`[RateLimit] Rate limit exceeded for key: ${key}, count: ${record.count}, max: ${maxRequests}`);
+        return {
+          allowed: false,
+          resetTime: record.resetTime,
+          remaining: 0,
+        };
+      }
+      
+      // Increment counter and update Redis
+      record.count++;
+      
+      // Set with expiration (TTL in seconds)
+      const ttlSeconds = Math.ceil((record.resetTime - now) / 1000);
+      await kv.setex(key, ttlSeconds, record);
+      
+      console.log(`[RateLimit] Request allowed for key: ${key}, count: ${record.count}/${maxRequests}, TTL: ${ttlSeconds}s`);
+      
       return {
-        allowed: false,
+        allowed: true,
         resetTime: record.resetTime,
-        remaining: 0,
+        remaining: maxRequests - record.count,
+      };
+    } catch (error) {
+      console.error('[RateLimit] Redis error, allowing request:', error);
+      // Fallback: allow request if Redis fails
+      return {
+        allowed: true,
+        resetTime: now + windowMs,
+        remaining: maxRequests - 1,
       };
     }
-    
-    // Increment counter and update store
-    record.count++;
-    requestStore.set(key, record);
-    
-    return {
-      allowed: true,
-      resetTime: record.resetTime,
-      remaining: maxRequests - record.count,
-    };
   };
 
   return {
@@ -72,8 +92,8 @@ export function createRateLimiter(config: RateLimitConfig) {
     /**
      * Check rate limit with sender address (after request processing)
      */
-    checkWithSender: (req: NextApiRequest, res: NextApiResponse, senderAddress: string): boolean => {
-      const result = checkRateLimit(req, senderAddress);
+    checkWithSender: async (req: NextApiRequest, res: NextApiResponse, senderAddress: string): Promise<boolean> => {
+      const result = await checkRateLimit(req, senderAddress);
       
       // Set rate limit headers
       res.setHeader('X-RateLimit-Limit', maxRequests);
@@ -98,7 +118,7 @@ export function createRateLimiter(config: RateLimitConfig) {
      */
     apply: (handler: (req: NextApiRequest, res: NextApiResponse) => Promise<void> | void) => {
       return async (req: NextApiRequest, res: NextApiResponse) => {
-        const result = checkRateLimit(req);
+        const result = await checkRateLimit(req);
         
         // Set rate limit headers
         res.setHeader('X-RateLimit-Limit', maxRequests);
@@ -191,24 +211,6 @@ export const RateLimitConfigs = {
 } as const;
 
 /**
- * Clean up expired entries from the request store
- * Should be called periodically to prevent memory leaks
+ * Redis automatically handles cleanup via TTL (Time To Live)
+ * No manual cleanup needed
  */
-export function cleanupRateLimitStore(): void {
-  const now = Date.now();
-  let cleaned = 0;
-  
-  requestStore.forEach((record, key) => {
-    if (now >= record.resetTime) {
-      requestStore.delete(key);
-      cleaned++;
-    }
-  });
-  
-  if (cleaned > 0) {
-    console.log(`[RateLimit] Cleaned up ${cleaned} expired entries`);
-  }
-}
-
-// Auto-cleanup every 5 minutes
-setInterval(cleanupRateLimitStore, 5 * 60 * 1000);

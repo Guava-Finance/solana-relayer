@@ -226,6 +226,8 @@ export function createAdvancedSecurityMiddleware() {
       // Validate signature
       const secretKey = process.env.REQUEST_SIGNING_SECRET || 'default-secret';
       const bodyString = JSON.stringify(req.body);
+
+      console.log('secretKey', secretKey);
       
       // Enhanced debugging for signature validation
       console.log('[RequestSigning] Signature validation debug:');

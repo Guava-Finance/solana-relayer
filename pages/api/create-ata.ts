@@ -19,6 +19,7 @@ import { createEncryptionMiddleware } from "../../utils/encrytption";
 import { createRateLimiter, RateLimitConfigs } from "../../utils/rateLimiter";
 import { TransactionMonitor } from "../../utils/transactionMonitoring";
 import { validateEmergencyBlacklist } from "../../utils/emergencyBlacklist";
+import { createAdvancedSecurityMiddleware } from "../../utils/requestSigning";
 
 type Data = {
     result: "success" | "error";
@@ -37,6 +38,7 @@ const encryptionMiddleware = createEncryptionMiddleware(
 );
 
 const rateLimiter = createRateLimiter(RateLimitConfigs.ACCOUNT_CREATION);
+const advancedSecurity = createAdvancedSecurityMiddleware();
 
 async function createAtaHandler(
     req: NextApiRequest,
@@ -59,6 +61,13 @@ async function createAtaHandler(
         if (!securityValidation.isValid) {
             console.log(`[API] /api/create-ata - Security validation failed: ${securityValidation.error}`);
             return res.status(401).json(createSecurityErrorResponse(securityValidation.error!));
+        }
+
+        // Advanced security validation (request signing)
+        const advancedSecurityValidation = await advancedSecurity.validateRequest(req);
+        if (!advancedSecurityValidation.valid) {
+            console.log(`[API] /api/create-ata - Advanced security validation failed: ${advancedSecurityValidation.error}`);
+            return res.status(401).json(createSecurityErrorResponse(advancedSecurityValidation.error!));
         }
 
         console.log(`[API] /api/create-ata - Request body:`, req.body);

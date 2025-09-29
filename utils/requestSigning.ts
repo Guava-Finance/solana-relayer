@@ -172,6 +172,16 @@ export class RequestSecurityManager {
 export function createAdvancedSecurityMiddleware() {
   return {
     validateRequest: async (req: any): Promise<{ valid: boolean; error?: string }> => {
+      // Check if request signing is enabled
+      const isRequestSigningEnabled = process.env.ENABLE_REQUEST_SIGNING === 'true';
+      
+      if (!isRequestSigningEnabled) {
+        console.log('[RequestSigning] Request signing is disabled, skipping validation');
+        return { valid: true };
+      }
+
+      console.log('[RequestSigning] Request signing is enabled, validating request');
+
       const { 
         'x-timestamp': timestamp,
         'x-nonce': nonce,
@@ -181,17 +191,28 @@ export function createAdvancedSecurityMiddleware() {
 
       // Validate required headers
       if (!timestamp || !nonce || !signature || !clientId) {
+        console.log('[RequestSigning] Missing required security headers');
         return { valid: false, error: 'Missing security headers' };
       }
 
       // Validate timestamp
       if (!RequestSecurityManager.validateTimestamp(parseInt(timestamp))) {
+        console.log('[RequestSigning] Invalid timestamp validation failed');
         return { valid: false, error: 'Invalid timestamp' };
       }
 
-      // Validate nonce
-      if (!(await RequestSecurityManager.validateAndConsumeNonce(nonce, clientId))) {
-        return { valid: false, error: 'Invalid or reused nonce' };
+      // Validate nonce (only if Redis is available)
+      try {
+        if (!(await RequestSecurityManager.validateAndConsumeNonce(nonce, clientId))) {
+          console.log('[RequestSigning] Nonce validation failed');
+          return { valid: false, error: 'Invalid or reused nonce' };
+        }
+      } catch (error) {
+        console.log('[RequestSigning] Nonce validation error (Redis may be unavailable):', error);
+        // In production, you might want to fail here, but for development we'll continue
+        if (process.env.NODE_ENV === 'production') {
+          return { valid: false, error: 'Nonce validation service unavailable' };
+        }
       }
 
       // Validate signature
@@ -207,9 +228,11 @@ export function createAdvancedSecurityMiddleware() {
         signature,
         secretKey
       )) {
+        console.log('[RequestSigning] Signature validation failed');
         return { valid: false, error: 'Invalid request signature' };
       }
 
+      console.log('[RequestSigning] Request validation successful');
       return { valid: true };
     }
   };

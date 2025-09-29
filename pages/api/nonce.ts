@@ -5,6 +5,7 @@ import createDurableNonce from "../../utils/nonce";
 import { validateSecurity, createSecurityErrorResponse } from "../../utils/security";
 import { createEncryptionMiddleware } from "../../utils/encrytption";
 import { createRateLimiter, RateLimitConfigs } from "../../utils/rateLimiter";
+import { createAdvancedSecurityMiddleware } from "../../utils/requestSigning";
 type Data = {
   result: "success" | "error";
   message:
@@ -21,6 +22,8 @@ const encryptionMiddleware = createEncryptionMiddleware(
 );
 
 const rateLimiter = createRateLimiter(RateLimitConfigs.NONCE_CREATION);
+const advancedSecurity = createAdvancedSecurityMiddleware();
+
 async function nonceHandler(
   req: NextApiRequest,
   res: NextApiResponse<Data>
@@ -31,6 +34,13 @@ async function nonceHandler(
     if (!securityValidation.isValid) {
       console.log(`[API] /api/nonce - Security validation failed: ${securityValidation.error}`);
       return res.status(401).json(createSecurityErrorResponse(securityValidation.error!));
+    }
+
+    // Advanced security validation (request signing)
+    const advancedSecurityValidation = await advancedSecurity.validateRequest(req);
+    if (!advancedSecurityValidation.valid) {
+      console.log(`[API] /api/nonce - Advanced security validation failed: ${advancedSecurityValidation.error}`);
+      return res.status(401).json(createSecurityErrorResponse(advancedSecurityValidation.error!));
     }
     const wallet = Keypair.fromSecretKey(base58.decode(process.env.WALLET!));
     const { nonceAccount, nonceAccountAuth } = await createDurableNonce(wallet);

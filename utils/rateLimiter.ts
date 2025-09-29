@@ -360,28 +360,28 @@ function getRateLimitKey(req: NextApiRequest): string {
 export const RateLimitConfigs = {
     // Strict limits for transaction endpoints
     TRANSACTION: {
-        windowMs: 1 * 60 * 1000, // 1 minute
+        windowMs: 1 * 60 * 1000, // 1 minute (FIXED!)
         maxRequests: 2, // 2 requests per minute
         message: "Too many transaction requests. Please wait before trying again.",
     },
 
     // Moderate limits for account creation
     ACCOUNT_CREATION: {
-        windowMs: 1 * 60 * 1000, // 1 minute
-        maxRequests: 1, // 2 requests per minute
+        windowMs: 1 * 60 * 1000, // 1 minute (FIXED!)
+        maxRequests: 1, // 1 request per minute
         message: "Too many account creation requests. Please wait before trying again.",
     },
 
     // Lenient limits for read operations
     READ_OPERATIONS: {
-        windowMs: 30 * 60 * 1000, // 1 minute
+        windowMs: 1 * 60 * 1000, // 1 minute (FIXED!)
         maxRequests: 10, // 10 requests per minute
         message: "Too many requests. Please wait before trying again.",
     },
 
     // Very strict limits for nonce creation (expensive operation)
     NONCE_CREATION: {
-        windowMs: 45 * 60 * 1000, // 5 minutes
+        windowMs: 5 * 60 * 1000, // 5 minutes
         maxRequests: 2, // 2 requests per 5 minutes
         message: "Too many nonce creation requests. Please wait before trying again.",
     },

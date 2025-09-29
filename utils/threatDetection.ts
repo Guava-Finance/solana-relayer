@@ -5,6 +5,16 @@ const redis = createClient({
   url: process.env.REDIS_URL
 });
 
+// Connect to Redis
+let redisConnected = false;
+redis.connect().then(() => {
+  console.log('[ThreatDetection] Connected to Redis');
+  redisConnected = true;
+}).catch((error) => {
+  console.error('[ThreatDetection] Failed to connect to Redis:', error);
+  redisConnected = false;
+});
+
 interface ThreatScore {
   score: number;
   reasons: string[];

@@ -6,6 +6,16 @@ const redis = createClient({
   url: process.env.REDIS_URL
 });
 
+// Connect to Redis
+let redisConnected = false;
+redis.connect().then(() => {
+  console.log('[RequestSigning] Connected to Redis');
+  redisConnected = true;
+}).catch((error) => {
+  console.error('[RequestSigning] Failed to connect to Redis:', error);
+  redisConnected = false;
+});
+
 /**
  * Advanced Request Security with Nonce and Timestamp Validation
  */

@@ -5,6 +5,16 @@ const redis = createClient({
   url: process.env.REDIS_URL
 });
 
+// Connect to Redis
+let redisConnected = false;
+redis.connect().then(() => {
+  console.log('[TransactionMonitor] Connected to Redis');
+  redisConnected = true;
+}).catch((error) => {
+  console.error('[TransactionMonitor] Failed to connect to Redis:', error);
+  redisConnected = false;
+});
+
 interface TransactionPattern {
   totalTransactions: number;
   totalVolume: number;
@@ -41,6 +51,18 @@ export class TransactionMonitor {
     
     const flags: string[] = [];
     let riskScore = 0;
+
+    // Check Redis connection
+    if (!redisConnected) {
+      console.warn('[TxMonitor] Redis not connected, allowing transaction with basic validation only');
+      // Perform basic validation without Redis
+      const basicAnalysis = this.analyzeAmountPatterns(amount, tokenMint);
+      return { 
+        allowed: basicAnalysis.riskScore < this.HIGH_RISK_THRESHOLD, 
+        riskScore: basicAnalysis.riskScore, 
+        flags: basicAnalysis.flags 
+      };
+    }
 
     // 1. Analyze sender patterns
     const senderAnalysis = await this.analyzeSenderBehavior(senderAddress, amount, receiverAddress);
@@ -275,11 +297,17 @@ export class TransactionMonitor {
       if (senderGreylisted) {
         riskScore += 40;
         flags.push(`Sender greylisted: ${senderAddress}`);
+        
+        // Check if greylisted address should be promoted to blacklist
+        await this.checkGreylistPromotion(senderAddress);
       }
 
       if (receiverGreylisted) {
         riskScore += 40;
         flags.push(`Receiver greylisted: ${receiverAddress}`);
+        
+        // Check if greylisted address should be promoted to blacklist
+        await this.checkGreylistPromotion(receiverAddress);
       }
 
     } catch (error) {
@@ -354,9 +382,43 @@ export class TransactionMonitor {
     try {
       await redis.sadd('greylist:addresses', address);
       await redis.hset('greylist:reasons', address, reason);
-      console.log(`[TxMonitor] Greylisted address: ${address} - ${reason}`);
+      
+      // Track greylist violations for promotion to blacklist
+      const violationKey = `greylist_violations:${address}`;
+      const violations = await redis.incr(violationKey);
+      await redis.expire(violationKey, 24 * 60 * 60); // 24 hour window
+      
+      console.log(`[TxMonitor] Greylisted address: ${address} - ${reason} (violations: ${violations})`);
     } catch (error) {
       console.error('[TxMonitor] Failed to greylist address:', error);
+    }
+  }
+
+  /**
+   * Check if greylisted address should be promoted to blacklist
+   */
+  private static async checkGreylistPromotion(address: string): Promise<void> {
+    try {
+      const violationKey = `greylist_violations:${address}`;
+      const violations = await redis.get(violationKey);
+      const violationCount = violations ? parseInt(violations) : 0;
+      
+      // Promote to blacklist after 3 violations in 24 hours
+      if (violationCount >= 3) {
+        console.log(`[TxMonitor] Promoting greylisted address to blacklist: ${address} (${violationCount} violations)`);
+        
+        // Move from greylist to blacklist
+        await redis.srem('greylist:addresses', address);
+        await redis.hdel('greylist:reasons', address);
+        await redis.del(violationKey);
+        
+        await this.blacklistAddress(
+          address, 
+          `Promoted from greylist: ${violationCount} violations in 24 hours`
+        );
+      }
+    } catch (error) {
+      console.error('[TxMonitor] Failed to check greylist promotion:', error);
     }
   }
 

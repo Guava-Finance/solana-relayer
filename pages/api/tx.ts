@@ -21,6 +21,7 @@ import { createEncryptionMiddleware } from "../../utils/encrytption";
 import { validateSecurity, createSecurityErrorResponse } from "../../utils/security";
 import { createRateLimiter, RateLimitConfigs } from "../../utils/rateLimiter";
 import { TransactionMonitor } from "../../utils/transactionMonitoring";
+import { validateEmergencyBlacklist } from "../../utils/emergencyBlacklist";
 
 const MEMO_PROGRAM_ID = new PublicKey("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr");
 
@@ -236,6 +237,22 @@ async function txHandler(
     const parsedAmount = typeof amount === 'string' ? parseFloat(amount) : amount;
     const parsedTransactionFee = typeof transactionFee === 'string' ? parseFloat(transactionFee) : transactionFee;
 
+    // EMERGENCY BLACKLIST CHECK (works even when Redis is down)
+    const emergencyCheck = validateEmergencyBlacklist(senderAddress, receiverAddress);
+    if (emergencyCheck.blocked) {
+      console.log(`[API] /api/tx - EMERGENCY BLACKLIST BLOCK:`, {
+        address: emergencyCheck.address,
+        reason: emergencyCheck.reason
+      });
+      
+      return res.status(403).json(encryptionMiddleware.processResponse({
+        result: "error",
+        message: { 
+          error: new Error(`Address blocked: ${emergencyCheck.reason}`) 
+        }
+      }, req.headers));
+    }
+
     // Transaction monitoring and blacklist check
     console.log(`[API] /api/tx - Analyzing transaction for suspicious patterns`);
     const transactionAnalysis = await TransactionMonitor.analyzeTransaction(
@@ -251,12 +268,19 @@ async function txHandler(
         flags: transactionAnalysis.flags
       });
       
-      // Auto-blacklist high-risk addresses
+      // Auto-blacklist high-risk addresses or repeated offenders
       if (transactionAnalysis.riskScore >= 100) {
         console.log(`[API] /api/tx - Auto-blacklisting high-risk sender: ${senderAddress}`);
         await TransactionMonitor.blacklistAddress(
           senderAddress, 
           `Auto-blacklisted: Risk score ${transactionAnalysis.riskScore}, Flags: ${transactionAnalysis.flags.join(', ')}`
+        );
+      } else if (transactionAnalysis.riskScore >= 80) {
+        // Check for repeated violations - greylist first, then blacklist
+        console.log(`[API] /api/tx - High-risk sender detected, adding to greylist: ${senderAddress}`);
+        await TransactionMonitor.greylistAddress(
+          senderAddress,
+          `Greylisted: Risk score ${transactionAnalysis.riskScore}, Flags: ${transactionAnalysis.flags.join(', ')}`
         );
       }
       

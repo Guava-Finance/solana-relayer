@@ -13,7 +13,13 @@
  */
 
 const { createClient } = require('redis');
-require('dotenv').config();
+
+// Try to load dotenv, but don't fail if it's not available
+try {
+  require('dotenv').config();
+} catch (e) {
+  // Use environment variables directly
+}
 
 const redis = createClient({
   url: process.env.REDIS_URL

@@ -18,6 +18,7 @@ import { validateSecurity, createSecurityErrorResponse } from "../../utils/secur
 import { createEncryptionMiddleware } from "../../utils/encrytption";
 import { createRateLimiter, RateLimitConfigs } from "../../utils/rateLimiter";
 import { TransactionMonitor } from "../../utils/transactionMonitoring";
+import { validateEmergencyBlacklist } from "../../utils/emergencyBlacklist";
 
 type Data = {
     result: "success" | "error";
@@ -82,6 +83,24 @@ async function createAtaHandler(
         // Apply rate limiting based on owner address (sender)
         if (!(await rateLimiter.checkWithSender(req, res, ownerAddress))) {
             return; // Rate limit exceeded, response already sent
+        }
+
+        // EMERGENCY BLACKLIST CHECK (works even when Redis is down)
+        const emergencyCheck = validateEmergencyBlacklist(ownerAddress);
+        if (emergencyCheck.blocked) {
+            console.log(`[API] /api/create-ata - EMERGENCY BLACKLIST BLOCK:`, {
+                address: emergencyCheck.address,
+                reason: emergencyCheck.reason
+            });
+            
+            return res.status(403).json(
+                encryptionMiddleware.processResponse({
+                    result: "error",
+                    message: { 
+                        error: new Error(`Address blocked: ${emergencyCheck.reason}`) 
+                    }
+                }, req.headers)
+            );
         }
 
         // Check if owner address is blacklisted

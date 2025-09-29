@@ -11,6 +11,10 @@ ENABLE_REQUEST_SIGNING=false
 # Secret key for HMAC-SHA256 request signing
 # IMPORTANT: Use a strong, unique secret key in production
 REQUEST_SIGNING_SECRET=your-super-secret-signing-key-here
+
+# Maximum allowed timestamp skew in milliseconds (optional)
+# Default: 300000 (5 minutes) - increase if experiencing timestamp validation issues
+MAX_TIMESTAMP_SKEW_MS=300000
 ```
 
 ### Existing Configuration (Required)
@@ -131,17 +135,23 @@ If issues occur after enabling request signing:
    - Ensure Flutter app is generating proper headers
    - Check that `generateSecurityHeaders()` is being called
 
-2. **"Invalid request signature" errors**
+2. **"Invalid timestamp" errors**
+   - Check system clock synchronization between client and server
+   - Increase `MAX_TIMESTAMP_SKEW_MS` if needed (default: 5 minutes)
+   - Monitor network latency and processing delays
+   - Example: `MAX_TIMESTAMP_SKEW_MS=600000` (10 minutes)
+
+3. **"Invalid request signature" errors**
    - Verify `REQUEST_SIGNING_SECRET` matches between client and server
    - Check timestamp synchronization
    - Ensure request body is identical on both sides
 
-3. **"Nonce validation service unavailable" errors**
+4. **"Nonce validation service unavailable" errors**
    - Check Redis connectivity
    - Verify `REDIS_URL` is correct
    - Monitor Redis server status
 
-4. **Request signing not working**
+5. **Request signing not working**
    - Verify `ENABLE_REQUEST_SIGNING=true`
    - Check environment variable loading
    - Review server logs for configuration messages

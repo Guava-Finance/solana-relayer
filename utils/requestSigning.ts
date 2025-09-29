@@ -66,7 +66,7 @@ redis.on('disconnect', () => {
  */
 export class RequestSecurityManager {
   private static readonly NONCE_EXPIRY = 5 * 60 * 1000; // 5 minutes
-  private static readonly MAX_TIMESTAMP_SKEW = 2 * 60 * 1000; // 2 minutes
+  private static readonly MAX_TIMESTAMP_SKEW = 5 * 60 * 1000 + 5000; // 5 minutes + 5 seconds buffer (increased for production tolerance)
 
   /**
    * Generate a secure nonce for request
@@ -82,11 +82,19 @@ export class RequestSecurityManager {
     const now = Date.now();
     const timeDiff = Math.abs(now - timestamp);
     
-    if (timeDiff > this.MAX_TIMESTAMP_SKEW) {
-      console.log(`[Security] Request timestamp too old/future: ${timeDiff}ms skew`);
+    // Allow configurable timestamp tolerance via environment variable
+    const maxSkew = process.env.MAX_TIMESTAMP_SKEW_MS 
+      ? parseInt(process.env.MAX_TIMESTAMP_SKEW_MS) 
+      : this.MAX_TIMESTAMP_SKEW;
+    
+    console.log(`[Security] Timestamp validation: now=${now}, request=${timestamp}, skew=${timeDiff}ms, maxAllowed=${maxSkew}ms`);
+    
+    if (timeDiff > maxSkew) {
+      console.log(`[Security] Request timestamp too old/future: ${timeDiff}ms skew exceeds ${maxSkew}ms limit`);
       return false;
     }
     
+    console.log(`[Security] Timestamp validation passed: ${timeDiff}ms skew within ${maxSkew}ms limit`);
     return true;
   }
 

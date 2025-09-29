@@ -226,29 +226,6 @@ export function createAdvancedSecurityMiddleware() {
       // Validate signature
       const secretKey = process.env.REQUEST_SIGNING_SECRET || 'default-secret';
       const bodyString = JSON.stringify(req.body);
-
-      console.log('secretKey', secretKey);
-      
-      // Enhanced debugging for signature validation
-      console.log('[RequestSigning] Signature validation debug:');
-      console.log(`  Method: ${req.method}`);
-      console.log(`  URL: ${req.url}`);
-      console.log(`  Body: ${bodyString}`);
-      console.log(`  Timestamp: ${timestamp}`);
-      console.log(`  Nonce: ${nonce}`);
-      console.log(`  Received signature: ${signature}`);
-      console.log(`  Secret key length: ${secretKey.length}`);
-      
-      // Generate expected signature for comparison
-      const expectedSignature = RequestSecurityManager.generateRequestSignature(
-        req.method,
-        req.url,
-        bodyString,
-        parseInt(timestamp),
-        nonce,
-        secretKey
-      );
-      console.log(`  Expected signature: ${expectedSignature}`);
       
       if (!RequestSecurityManager.validateRequestSignature(
         req.method,
@@ -259,7 +236,7 @@ export function createAdvancedSecurityMiddleware() {
         signature,
         secretKey
       )) {
-        console.log('[RequestSigning] Signature validation failed - signatures do not match');
+        console.log('[RequestSigning] Signature validation failed');
         return { valid: false, error: 'Invalid request signature' };
       }
 

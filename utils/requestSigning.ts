@@ -3,16 +3,61 @@ import { createClient } from 'redis';
 
 // Use existing Redis connection
 const redis = createClient({
-  url: process.env.REDIS_URL
+  url: process.env.REDIS_URL,
+  socket: {
+    connectTimeout: 10000, // 10 seconds
+    reconnectStrategy: (retries) => {
+      if (retries > 3) {
+        console.log('[RequestSigning] Max Redis reconnection attempts reached');
+        return false;
+      }
+      return Math.min(retries * 100, 3000);
+    }
+  }
 });
 
-// Connect to Redis
+// Connect to Redis with retry logic
 let redisConnected = false;
-redis.connect().then(() => {
-  console.log('[RequestSigning] Connected to Redis');
+let connectionAttempts = 0;
+
+async function connectRedis() {
+  if (connectionAttempts >= 3) {
+    console.log('[RequestSigning] Max connection attempts reached, using fallback mode');
+    return;
+  }
+  
+  try {
+    connectionAttempts++;
+    await redis.connect();
+    console.log('[RequestSigning] Connected to Redis');
+    redisConnected = true;
+  } catch (error) {
+    console.error(`[RequestSigning] Failed to connect to Redis (attempt ${connectionAttempts}):`, error instanceof Error ? error.message : String(error));
+    redisConnected = false;
+    
+    // Retry after delay
+    if (connectionAttempts < 3) {
+      setTimeout(connectRedis, 5000);
+    }
+  }
+}
+
+// Initial connection attempt
+connectRedis();
+
+// Handle Redis errors
+redis.on('error', (error) => {
+  console.error('[RequestSigning] Redis error:', error.message);
+  redisConnected = false;
+});
+
+redis.on('connect', () => {
+  console.log('[RequestSigning] Redis connected');
   redisConnected = true;
-}).catch((error) => {
-  console.error('[RequestSigning] Failed to connect to Redis:', error);
+});
+
+redis.on('disconnect', () => {
+  console.log('[RequestSigning] Redis disconnected');
   redisConnected = false;
 });
 
@@ -60,7 +105,7 @@ export class RequestSecurityManager {
       }
       
       // Mark nonce as used
-      await redis.setex(key, Math.ceil(this.NONCE_EXPIRY / 1000), 'used');
+      await redis.setEx(key, Math.ceil(this.NONCE_EXPIRY / 1000), 'used');
       return true;
       
     } catch (error) {

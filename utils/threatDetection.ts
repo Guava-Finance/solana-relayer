@@ -2,16 +2,61 @@ import { createClient } from 'redis';
 import type { NextApiRequest } from 'next';
 
 const redis = createClient({
-  url: process.env.REDIS_URL
+  url: process.env.REDIS_URL,
+  socket: {
+    connectTimeout: 10000, // 10 seconds
+    reconnectStrategy: (retries) => {
+      if (retries > 3) {
+        console.log('[ThreatDetection] Max Redis reconnection attempts reached');
+        return false;
+      }
+      return Math.min(retries * 100, 3000);
+    }
+  }
 });
 
-// Connect to Redis
+// Connect to Redis with retry logic
 let redisConnected = false;
-redis.connect().then(() => {
-  console.log('[ThreatDetection] Connected to Redis');
+let connectionAttempts = 0;
+
+async function connectRedis() {
+  if (connectionAttempts >= 3) {
+    console.log('[ThreatDetection] Max connection attempts reached, using fallback mode');
+    return;
+  }
+  
+  try {
+    connectionAttempts++;
+    await redis.connect();
+    console.log('[ThreatDetection] Connected to Redis');
+    redisConnected = true;
+  } catch (error) {
+    console.error(`[ThreatDetection] Failed to connect to Redis (attempt ${connectionAttempts}):`, error instanceof Error ? error.message : String(error));
+    redisConnected = false;
+    
+    // Retry after delay
+    if (connectionAttempts < 3) {
+      setTimeout(connectRedis, 5000);
+    }
+  }
+}
+
+// Initial connection attempt
+connectRedis();
+
+// Handle Redis errors
+redis.on('error', (error) => {
+  console.error('[ThreatDetection] Redis error:', error.message);
+  redisConnected = false;
+});
+
+redis.on('connect', () => {
+  console.log('[ThreatDetection] Redis connected');
   redisConnected = true;
-}).catch((error) => {
-  console.error('[ThreatDetection] Failed to connect to Redis:', error);
+});
+
+redis.on('disconnect', () => {
+  console.log('[ThreatDetection] Redis disconnected');
   redisConnected = false;
 });
 
@@ -144,7 +189,7 @@ export class ThreatDetectionSystem {
         userAgents: Array.from(pattern.userAgents),
         endpoints: Array.from(pattern.endpoints)
       };
-      await redis.setex(key, 3600, JSON.stringify(serialized)); // 1 hour TTL
+      await redis.setEx(key, 3600, JSON.stringify(serialized)); // 1 hour TTL
 
     } catch (error) {
       console.error('[ThreatDetection] IP analysis error:', error);
@@ -204,7 +249,7 @@ export class ThreatDetectionSystem {
       const now = Date.now();
       
       // Get recent request timestamps
-      const timestamps = await redis.lrange(key, 0, -1);
+      const timestamps = await redis.lRange(key, 0, -1);
       const timestampArray = Array.isArray(timestamps) ? timestamps : [];
       const recentTimestamps = timestampArray
         .filter((ts): ts is string => typeof ts === 'string')
@@ -240,8 +285,8 @@ export class ThreatDetectionSystem {
       }
 
       // Store current timestamp
-      await redis.lpush(key, now.toString());
-      await redis.ltrim(key, 0, 19); // Keep last 20 timestamps
+      await redis.lPush(key, now.toString());
+      await redis.lTrim(key, 0, 19); // Keep last 20 timestamps
       await redis.expire(key, 300); // 5 minute TTL
 
     } catch (error) {
@@ -287,8 +332,8 @@ export class ThreatDetectionSystem {
         timestamp: Date.now()
       };
 
-      await redis.lpush('threat_events', JSON.stringify(event));
-      await redis.ltrim('threat_events', 0, 999); // Keep last 1000 events
+      await redis.lPush('threat_events', JSON.stringify(event));
+      await redis.lTrim('threat_events', 0, 999); // Keep last 1000 events
     } catch (error) {
       console.error('[ThreatDetection] Failed to record threat event:', error);
     }
@@ -330,7 +375,7 @@ export class ThreatDetectionSystem {
    */
   static async blockIP(ip: string, duration: number = 3600): Promise<void> {
     try {
-      await redis.setex(`blocked:${ip}`, duration, 'true');
+      await redis.setEx(`blocked:${ip}`, duration, 'true');
       console.log(`[ThreatDetection] Blocked IP: ${ip} for ${duration} seconds`);
     } catch (error) {
       console.error('[ThreatDetection] Block IP error:', error);

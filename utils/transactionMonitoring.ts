@@ -2,16 +2,61 @@ import { Connection, PublicKey } from '@solana/web3.js';
 import { createClient } from 'redis';
 
 const redis = createClient({
-  url: process.env.REDIS_URL
+  url: process.env.REDIS_URL,
+  socket: {
+    connectTimeout: 10000, // 10 seconds
+    reconnectStrategy: (retries) => {
+      if (retries > 3) {
+        console.log('[TransactionMonitor] Max Redis reconnection attempts reached');
+        return false;
+      }
+      return Math.min(retries * 100, 3000);
+    }
+  }
 });
 
-// Connect to Redis
+// Connect to Redis with retry logic
 let redisConnected = false;
-redis.connect().then(() => {
-  console.log('[TransactionMonitor] Connected to Redis');
+let connectionAttempts = 0;
+
+async function connectRedis() {
+  if (connectionAttempts >= 3) {
+    console.log('[TransactionMonitor] Max connection attempts reached, using fallback mode');
+    return;
+  }
+  
+  try {
+    connectionAttempts++;
+    await redis.connect();
+    console.log('[TransactionMonitor] Connected to Redis');
+    redisConnected = true;
+  } catch (error) {
+    console.error(`[TransactionMonitor] Failed to connect to Redis (attempt ${connectionAttempts}):`, error instanceof Error ? error.message : String(error));
+    redisConnected = false;
+    
+    // Retry after delay
+    if (connectionAttempts < 3) {
+      setTimeout(connectRedis, 5000);
+    }
+  }
+}
+
+// Initial connection attempt
+connectRedis();
+
+// Handle Redis errors
+redis.on('error', (error) => {
+  console.error('[TransactionMonitor] Redis error:', error.message);
+  redisConnected = false;
+});
+
+redis.on('connect', () => {
+  console.log('[TransactionMonitor] Redis connected');
   redisConnected = true;
-}).catch((error) => {
-  console.error('[TransactionMonitor] Failed to connect to Redis:', error);
+});
+
+redis.on('disconnect', () => {
+  console.log('[TransactionMonitor] Redis disconnected');
   redisConnected = false;
 });
 
@@ -52,16 +97,39 @@ export class TransactionMonitor {
     const flags: string[] = [];
     let riskScore = 0;
 
-    // Check Redis connection
+    // Check Redis connection - but still do critical security checks
     if (!redisConnected) {
-      console.warn('[TxMonitor] Redis not connected, allowing transaction with basic validation only');
+      console.warn('🚨 [TxMonitor] Redis not connected, using EMERGENCY FALLBACK security checks');
+      
+      // CRITICAL: Still check emergency blacklist even without Redis
+      const { isEmergencyBlacklisted } = await import('./emergencyBlacklist');
+      
+      if (isEmergencyBlacklisted(senderAddress)) {
+        riskScore += 100;
+        flags.push(`🚫 EMERGENCY BLACKLIST: Sender blocked: ${senderAddress}`);
+        console.error(`🚨 [TxMonitor] EMERGENCY BLACKLIST TRIGGERED: ${senderAddress}`);
+      }
+      
+      if (isEmergencyBlacklisted(receiverAddress)) {
+        riskScore += 100;
+        flags.push(`🚫 EMERGENCY BLACKLIST: Receiver blocked: ${receiverAddress}`);
+        console.error(`🚨 [TxMonitor] EMERGENCY BLACKLIST TRIGGERED: ${receiverAddress}`);
+      }
+      
       // Perform basic validation without Redis
       const basicAnalysis = this.analyzeAmountPatterns(amount, tokenMint);
-      return { 
-        allowed: basicAnalysis.riskScore < this.HIGH_RISK_THRESHOLD, 
-        riskScore: basicAnalysis.riskScore, 
-        flags: basicAnalysis.flags 
-      };
+      riskScore += basicAnalysis.riskScore;
+      flags.push(...basicAnalysis.flags);
+      
+      const allowed = riskScore < this.HIGH_RISK_THRESHOLD;
+      
+      if (!allowed) {
+        console.error(`🚨 [TxMonitor] EMERGENCY FALLBACK BLOCK: ${senderAddress} -> ${receiverAddress}, Risk: ${riskScore}`, flags);
+      } else {
+        console.log(`⚠️  [TxMonitor] FALLBACK MODE: Transaction allowed with basic validation only`);
+      }
+      
+      return { allowed, riskScore, flags };
     }
 
     // 1. Analyze sender patterns
@@ -168,7 +236,7 @@ export class TransactionMonitor {
         ...pattern,
         uniqueReceivers: Array.from(pattern.uniqueReceivers)
       };
-      await redis.setex(key, 86400, JSON.stringify(serialized)); // 24 hour TTL
+      await redis.setEx(key, 86400, JSON.stringify(serialized)); // 24 hour TTL
 
     } catch (error) {
       console.error('[TxMonitor] Sender analysis error:', error);
@@ -219,7 +287,7 @@ export class TransactionMonitor {
       }
 
       // Save updated data
-      await redis.setex(key, 86400, JSON.stringify({
+      await redis.setEx(key, 86400, JSON.stringify({
         count: receivedCount,
         total: totalReceived,
         lastUpdate: Date.now()
@@ -277,8 +345,8 @@ export class TransactionMonitor {
 
     try {
       // Check internal blacklist
-      const senderBlacklisted = await redis.sismember('blacklist:addresses', senderAddress);
-      const receiverBlacklisted = await redis.sismember('blacklist:addresses', receiverAddress);
+      const senderBlacklisted = await redis.sIsMember('blacklist:addresses', senderAddress);
+      const receiverBlacklisted = await redis.sIsMember('blacklist:addresses', receiverAddress);
 
       if (senderBlacklisted) {
         riskScore += 100; // Immediate block
@@ -291,8 +359,8 @@ export class TransactionMonitor {
       }
 
       // Check greylist (suspicious but not blocked)
-      const senderGreylisted = await redis.sismember('greylist:addresses', senderAddress);
-      const receiverGreylisted = await redis.sismember('greylist:addresses', receiverAddress);
+      const senderGreylisted = await redis.sIsMember('greylist:addresses', senderAddress);
+      const receiverGreylisted = await redis.sIsMember('greylist:addresses', receiverAddress);
 
       if (senderGreylisted) {
         riskScore += 40;
@@ -355,8 +423,8 @@ export class TransactionMonitor {
         timestamp: Date.now()
       };
 
-      await redis.lpush('suspicious_transactions', JSON.stringify(event));
-      await redis.ltrim('suspicious_transactions', 0, 999); // Keep last 1000
+      await redis.lPush('suspicious_transactions', JSON.stringify(event));
+      await redis.lTrim('suspicious_transactions', 0, 999); // Keep last 1000
     } catch (error) {
       console.error('[TxMonitor] Failed to record suspicious transaction:', error);
     }
@@ -367,8 +435,8 @@ export class TransactionMonitor {
    */
   static async blacklistAddress(address: string, reason: string): Promise<void> {
     try {
-      await redis.sadd('blacklist:addresses', address);
-      await redis.hset('blacklist:reasons', address, reason);
+      await redis.sAdd('blacklist:addresses', address);
+      await redis.hSet('blacklist:reasons', address, reason);
       console.log(`[TxMonitor] Blacklisted address: ${address} - ${reason}`);
     } catch (error) {
       console.error('[TxMonitor] Failed to blacklist address:', error);
@@ -380,8 +448,8 @@ export class TransactionMonitor {
    */
   static async greylistAddress(address: string, reason: string): Promise<void> {
     try {
-      await redis.sadd('greylist:addresses', address);
-      await redis.hset('greylist:reasons', address, reason);
+      await redis.sAdd('greylist:addresses', address);
+      await redis.hSet('greylist:reasons', address, reason);
       
       // Track greylist violations for promotion to blacklist
       const violationKey = `greylist_violations:${address}`;
@@ -408,8 +476,8 @@ export class TransactionMonitor {
         console.log(`[TxMonitor] Promoting greylisted address to blacklist: ${address} (${violationCount} violations)`);
         
         // Move from greylist to blacklist
-        await redis.srem('greylist:addresses', address);
-        await redis.hdel('greylist:reasons', address);
+        await redis.sRem('greylist:addresses', address);
+        await redis.hDel('greylist:reasons', address);
         await redis.del(violationKey);
         
         await this.blacklistAddress(
@@ -427,9 +495,9 @@ export class TransactionMonitor {
    */
   static async getTransactionStats(): Promise<any> {
     try {
-      const suspiciousCount = await redis.llen('suspicious_transactions');
-      const blacklistCount = await redis.scard('blacklist:addresses');
-      const greylistCount = await redis.scard('greylist:addresses');
+      const suspiciousCount = await redis.lLen('suspicious_transactions');
+      const blacklistCount = await redis.sCard('blacklist:addresses');
+      const greylistCount = await redis.sCard('greylist:addresses');
 
       return {
         suspiciousTransactions: suspiciousCount,

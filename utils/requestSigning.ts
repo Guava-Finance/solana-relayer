@@ -190,23 +190,28 @@ export function createAdvancedSecurityMiddleware() {
       if (!clientId) missingHeaders.push('x-client-id');
       
       if (missingHeaders.length > 0) {
-        return { valid: false, error: `Missing security headers: ${missingHeaders.join(', ')}` };
+        // Log specific error internally but return generic message
+        console.log(`[RequestSigning] Missing headers: ${missingHeaders.join(', ')}`);
+        return { valid: false, error: 'unauthorized access' };
       }
 
       // Validate timestamp
       if (!RequestSecurityManager.validateTimestamp(parseInt(timestamp))) {
-        return { valid: false, error: 'Invalid timestamp' };
+        console.log(`[RequestSigning] Invalid timestamp: ${timestamp}`);
+        return { valid: false, error: 'unauthorized access' };
       }
 
       // Validate nonce (only if Redis is available)
       try {
         if (!(await RequestSecurityManager.validateAndConsumeNonce(nonce, clientId))) {
-          return { valid: false, error: 'Invalid or reused nonce' };
+          console.log(`[RequestSigning] Invalid or reused nonce: ${nonce}`);
+          return { valid: false, error: 'unauthorized access' };
         }
       } catch (error) {
         // In production, you might want to fail here, but for development we'll continue
         if (process.env.NODE_ENV === 'production') {
-          return { valid: false, error: 'Nonce validation service unavailable' };
+          console.log(`[RequestSigning] Nonce validation service unavailable`);
+          return { valid: false, error: 'unauthorized access' };
         }
       }
 
@@ -235,7 +240,8 @@ export function createAdvancedSecurityMiddleware() {
         signature,
         secretKey
       )) {
-        return { valid: false, error: 'Invalid request signature' };
+        console.log(`[RequestSigning] Invalid signature for client: ${clientId}`);
+        return { valid: false, error: 'unauthorized access' };
       }
 
       return { valid: true };

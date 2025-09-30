@@ -18,7 +18,7 @@ import {
 import base58 from "bs58";
 import type { NextApiRequest, NextApiResponse } from "next";
 import { createEncryptionMiddleware } from "../../utils/encrytption";
-import { validateSecurity, createSecurityErrorResponse } from "../../utils/security";
+import { validateSecurity, createSecurityErrorResponse, createEncryptedUnauthorizedResponse } from "../../utils/security";
 import { createRateLimiter, RateLimitConfigs } from "../../utils/rateLimiter";
 import { TransactionMonitor } from "../../utils/transactionMonitoring";
 import { validateEmergencyBlacklist } from "../../utils/emergencyBlacklist";
@@ -225,7 +225,7 @@ async function txHandler(
     const advancedSecurityValidation = await advancedSecurity.validateRequest(req, processedBody);
     if (!advancedSecurityValidation.valid) {
       console.log(`[API] /api/tx - Advanced security validation failed: ${advancedSecurityValidation.error}`);
-      return res.status(401).json(createSecurityErrorResponse(advancedSecurityValidation.error!));
+      return res.status(401).json(createEncryptedUnauthorizedResponse());
     }
 
     const {

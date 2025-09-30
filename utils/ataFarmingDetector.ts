@@ -9,6 +9,10 @@
  * - Airdrop Farming: Batch ATA creations (high volume initializes, low closures, possibly with dust transfers)
  * - Sybil-like Behavior: Small SOL transfers out (funding multiple child wallets for farming)
  * - Batch Creations: Multiple ATAs created in single transactions or clustered in time
+ * 
+ * Auto-Blacklisting:
+ * - Automatically adds suspicious wallets to Redis blacklist
+ * - Immediate blocking on subsequent transactions
  */
 
 // Helius REST API configuration
@@ -16,6 +20,9 @@ const HELIUS_API_URL = "https://api.helius.xyz/v0";
 const ATA_PROGRAM_ID = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
 const TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 const SYSTEM_PROGRAM_ID = "11111111111111111111111111111111";
+
+// Import Redis blacklist functionality
+import { addToRedisBlacklist, checkRedisBlacklist } from './redisBlacklist';
 
 interface HeliusTransaction {
   signature: string;
@@ -73,6 +80,30 @@ export async function analyzeAtaFarmingHistory(
   let riskScore = 0;
   
   try {
+    // Quick check: Skip analysis if wallet is already blacklisted
+    const existingBlacklist = await checkRedisBlacklist(walletAddress);
+    if (existingBlacklist.blocked) {
+      console.log(`[ATA_DETECTOR] ⚡ Wallet already blacklisted - skipping analysis: ${walletAddress}`);
+      return {
+        isSuspicious: true,
+        riskScore: 100,
+        flags: [`ALREADY_BLACKLISTED: ${existingBlacklist.reason}`],
+        details: {
+          totalAccountCreations: 0,
+          totalAccountClosures: 0,
+          recentAccountCreations: 0,
+          recentAccountClosures: 0,
+          avgTimeBetweenCreateClose: 0,
+          maxCreationsPerTx: 0,
+          batchCreationTxCount: 0,
+          totalBatchedCreations: 0,
+          batchPercentage: 0,
+          totalSmallSolTransfers: 0,
+          suspiciousPatterns: [],
+          analysisTimestamp: Math.floor(Date.now() / 1000),
+        },
+      };
+    }
     // Validate Helius API key
     const apiKey = process.env.HELIUS_API_KEY;
     if (!apiKey || apiKey === "") {
@@ -358,6 +389,16 @@ export async function analyzeAtaFarmingHistory(
         riskScore,
         flags,
       });
+      
+      // AUTO-BLACKLIST: Add suspicious wallet to Redis blacklist immediately
+      try {
+        const blacklistReason = `ATA farming detected: Risk score ${riskScore}, Flags: ${flags.join(', ')}`;
+        await addToRedisBlacklist(walletAddress, blacklistReason);
+        console.log(`[ATA_DETECTOR] 🚫 AUTO-BLACKLISTED: ${walletAddress} - ${blacklistReason}`);
+      } catch (blacklistError) {
+        console.error(`[ATA_DETECTOR] ❌ Failed to blacklist ${walletAddress}:`, blacklistError);
+        // Continue with analysis even if blacklisting fails
+      }
     } else {
       console.log(`[ATA_DETECTOR] ✅ Clean wallet - Risk score: ${riskScore}`);
     }

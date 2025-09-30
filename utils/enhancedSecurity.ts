@@ -1,6 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { ThreatDetectionSystem } from './threatDetection';
-import { TransactionMonitor } from './transactionMonitoring';
+import { validateRedisBlacklist } from './redisBlacklist';
 import { createAdvancedSecurityMiddleware } from './requestSigning';
 
 /**
@@ -74,26 +74,22 @@ export class EnhancedSecurityManager {
     flags?: string[];
   }> {
     
-    const analysis = await TransactionMonitor.analyzeTransaction(
-      senderAddress,
-      receiverAddress,
-      amount,
-      tokenMint
-    );
-
-    if (!analysis.allowed) {
+    // Check Redis blacklist
+    const blacklistCheck = await validateRedisBlacklist(senderAddress, receiverAddress);
+    
+    if (blacklistCheck.blocked) {
       return {
         allowed: false,
-        error: 'Transaction blocked due to suspicious patterns',
-        riskScore: analysis.riskScore,
-        flags: analysis.flags
+        error: `Address blocked: ${blacklistCheck.reason}`,
+        riskScore: 100,
+        flags: ['BLACKLISTED']
       };
     }
 
     return {
       allowed: true,
-      riskScore: analysis.riskScore,
-      flags: analysis.flags
+      riskScore: 0,
+      flags: []
     };
   }
 
@@ -146,7 +142,6 @@ export class EnhancedSecurityManager {
  */
 export interface SecurityConfig {
   enableThreatDetection: boolean;
-  enableTransactionMonitoring: boolean;
   enableRequestSigning: boolean;
   threatThreshold: number;
   transactionRiskThreshold: number;
@@ -159,7 +154,6 @@ export interface SecurityConfig {
  */
 export const DEFAULT_SECURITY_CONFIG: SecurityConfig = {
   enableThreatDetection: true,
-  enableTransactionMonitoring: true,
   enableRequestSigning: false, // Requires client-side implementation
   threatThreshold: 75,
   transactionRiskThreshold: 80,
@@ -184,9 +178,6 @@ export function createEnhancedSecurityMiddleware(config: Partial<SecurityConfig>
       amount: number,
       tokenMint: string
     ) => {
-      if (!finalConfig.enableTransactionMonitoring) {
-        return { allowed: true };
-      }
       
       return await EnhancedSecurityManager.validateTransaction(
         senderAddress,

@@ -17,8 +17,7 @@ import type { NextApiRequest, NextApiResponse } from "next";
 import { validateSecurity, createSecurityErrorResponse, createEncryptedUnauthorizedResponse } from "../../utils/security";
 import { createEncryptionMiddleware } from "../../utils/encrytption";
 import { createRateLimiter, RateLimitConfigs } from "../../utils/rateLimiter";
-import { TransactionMonitor } from "../../utils/transactionMonitoring";
-import { validateEmergencyBlacklist } from "../../utils/emergencyBlacklist";
+import { validateRedisBlacklist } from "../../utils/redisBlacklist";
 import { createAdvancedSecurityMiddleware } from "../../utils/requestSigning";
 
 type Data = {
@@ -95,49 +94,23 @@ async function createAtaHandler(
             return; // Rate limit exceeded, response already sent
         }
 
-        // EMERGENCY BLACKLIST CHECK (works even when Redis is down)
-        const emergencyCheck = validateEmergencyBlacklist(ownerAddress);
-        if (emergencyCheck.blocked) {
-            console.log(`[API] /api/create-ata - EMERGENCY BLACKLIST BLOCK:`, {
-                address: emergencyCheck.address,
-                reason: emergencyCheck.reason
+        // REDIS BLACKLIST CHECK
+        const blacklistCheck = await validateRedisBlacklist(ownerAddress, ownerAddress);
+        if (blacklistCheck.blocked) {
+            console.log(`[API] /api/create-ata - REDIS BLACKLIST BLOCK:`, {
+                address: blacklistCheck.address,
+                reason: blacklistCheck.reason
             });
             
             return res.status(403).json(
                 encryptionMiddleware.processResponse({
                     result: "error",
-                    message: { 
-                        error: new Error(`Address blocked: ${emergencyCheck.reason}`) 
-                    }
+                    message: (`Address blocked: ${blacklistCheck.reason}`)
                 }, req.headers)
             );
         }
 
-        // Check if owner address is blacklisted
-        console.log(`[API] /api/create-ata - Checking blacklist for owner: ${ownerAddress}`);
-        const blacklistCheck = await TransactionMonitor.analyzeTransaction(
-            ownerAddress,
-            ownerAddress, // For ATA creation, sender and receiver are the same
-            0, // No amount for ATA creation
-            tokenMint
-        );
-
-        if (!blacklistCheck.allowed) {
-            console.log(`[API] /api/create-ata - ATA creation blocked for blacklisted address:`, {
-                owner: ownerAddress,
-                riskScore: blacklistCheck.riskScore,
-                flags: blacklistCheck.flags
-            });
-            
-            return res.status(403).json(
-                encryptionMiddleware.processResponse({
-                    result: "error",
-                    message: { 
-                        error: new Error(`ATA creation blocked: ${blacklistCheck.flags.join(', ')}`) 
-                    }
-                }, req.headers)
-            );
-        }
+        // Blacklist check already completed above
 
         console.log(`[API] /api/create-ata - Processing request for owner: ${ownerAddress}, mint: ${tokenMint}`);
 

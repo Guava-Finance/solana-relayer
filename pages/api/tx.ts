@@ -20,9 +20,9 @@ import type { NextApiRequest, NextApiResponse } from "next";
 import { createEncryptionMiddleware } from "../../utils/encrytption";
 import { validateSecurity, createSecurityErrorResponse, createEncryptedUnauthorizedResponse } from "../../utils/security";
 import { createRateLimiter, RateLimitConfigs } from "../../utils/rateLimiter";
-import { TransactionMonitor } from "../../utils/transactionMonitoring";
-import { validateEmergencyBlacklist } from "../../utils/emergencyBlacklist";
+import { validateRedisBlacklist, addToRedisBlacklist } from "../../utils/redisBlacklist";
 import { createAdvancedSecurityMiddleware } from "../../utils/requestSigning";
+import { getCachedAtaFarmingAnalysis } from "../../utils/ataFarmingDetector";
 
 const MEMO_PROGRAM_ID = new PublicKey("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr");
 
@@ -46,14 +46,16 @@ type NetworkCongestion = 'low' | 'medium' | 'high' | 'extreme';
 type Data = {
   result: "success" | "error";
   message:
-    | {
-        tx: string;
-        signatures: ({ key: string; signature: string | null } | null)[];
-        priorityFee?: number;
-        networkCongestion?: NetworkCongestion;
-        estimatedTotalCost?: number;
-      }
-    | { error: Error };
+  | {
+    tx: string;
+    signatures: ({ key: string; signature: string | null } | null)[];
+    priorityFee?: number;
+    networkCongestion?: NetworkCongestion;
+    estimatedTotalCost?: number;
+    ataCreationCost?: number;
+    ataCreationCount?: number;
+  }
+  | { error: Error };
 };
 
 const encryptionMiddleware = createEncryptionMiddleware(
@@ -73,11 +75,11 @@ async function detectNetworkCongestion(connection: Connection): Promise<{
   computeUnits: number;
 }> {
   console.log(`[CONGESTION] Detecting network congestion...`);
-  
+
   try {
     // Get recent performance samples to analyze network health
     const perfSamples = await connection.getRecentPerformanceSamples(5);
-    
+
     if (perfSamples.length === 0) {
       console.log(`[CONGESTION] No performance samples available, using medium congestion settings`);
       return {
@@ -100,24 +102,24 @@ async function detectNetworkCongestion(connection: Connection): Promise<{
 
     const avgSlotTime = totalSamplePeriod / totalSlots;
     const avgTxPerSlot = totalTransactions / totalSlots;
-    
+
     console.log(`[CONGESTION] Average slot time: ${avgSlotTime.toFixed(3)}s`);
     console.log(`[CONGESTION] Average transactions per slot: ${avgTxPerSlot.toFixed(0)}`);
 
     // Additional check: Get recent prioritization fees from successful transactions
     let suggestedPriorityFee = PRIORITY_FEE_CONFIG.LOW_CONGESTION;
-    
+
     try {
       const recentFees = await connection.getRecentPrioritizationFees({
         lockedWritableAccounts: [new PublicKey("11111111111111111111111111111111")] // System program
       });
-      
+
       if (recentFees.length > 0) {
         // Calculate 75th percentile of recent fees for better success rate
         const fees = recentFees.map(f => f.prioritizationFee).sort((a, b) => a - b);
         const percentile75Index = Math.floor(fees.length * 0.75);
         suggestedPriorityFee = Math.max(fees[percentile75Index], PRIORITY_FEE_CONFIG.LOW_CONGESTION);
-        
+
         console.log(`[CONGESTION] Recent priority fees (75th percentile): ${suggestedPriorityFee} microlamports`);
       }
     } catch (error) {
@@ -176,10 +178,10 @@ async function detectNetworkCongestion(connection: Connection): Promise<{
 function calculateTransactionCost(priorityFee: number, computeUnits: number): number {
   // Base transaction fee (approximately 5000 lamports)
   const baseFee = 5000;
-  
+
   // Priority fee calculation: (priorityFee in microlamports * computeUnits) / 1,000,000
   const priorityFeeCost = Math.ceil((priorityFee * computeUnits) / 1_000_000);
-  
+
   return baseFee + priorityFeeCost;
 }
 
@@ -238,7 +240,9 @@ async function txHandler(
       narration
     } = processedBody;
 
-    // Apply rate limiting based on sender address
+    // ========================================
+    // STEP 1: Rate Limiting
+    // ========================================
     if (!(await rateLimiter.checkWithSender(req, res, senderAddress))) {
       return; // Rate limit exceeded, response already sent
     }
@@ -247,128 +251,32 @@ async function txHandler(
     const parsedAmount = typeof amount === 'string' ? parseFloat(amount) : amount;
     const parsedTransactionFee = typeof transactionFee === 'string' ? parseFloat(transactionFee) : transactionFee;
 
-    // EMERGENCY BLACKLIST CHECK (works even when Redis is down)
-    const emergencyCheck = validateEmergencyBlacklist(senderAddress, receiverAddress);
-    if (emergencyCheck.blocked) {
-      console.log(`[API] /api/tx - EMERGENCY BLACKLIST BLOCK:`, {
-        address: emergencyCheck.address,
-        reason: emergencyCheck.reason
+    // ========================================
+    // STEP 2: Redis Blacklist Check
+    // ========================================
+    const blacklistCheck = await validateRedisBlacklist(senderAddress, receiverAddress);
+    if (blacklistCheck.blocked) {
+      console.log(`[API] /api/tx - REDIS BLACKLIST BLOCK:`, {
+        address: blacklistCheck.address,
+        reason: blacklistCheck.reason
       });
-      
+
       return res.status(403).json(encryptionMiddleware.processResponse({
         result: "error",
-        message: { 
-          error: new Error(`Address blocked: ${emergencyCheck.reason}`) 
-        }
+        message: (`${blacklistCheck.reason}`)
       }, req.headers));
     }
 
-    // Transaction monitoring and blacklist check
-    console.log(`[API] /api/tx - Analyzing transaction for suspicious patterns`);
-    const transactionAnalysis = await TransactionMonitor.analyzeTransaction(
-      senderAddress,
-      receiverAddress,
-      parsedAmount,
-      tokenMint
-    );
+    // ========================================
+    // STEP 3: Check if ATA needs to be created
+    // ========================================
+    console.log(`[API] /api/tx - Checking ATA requirements...`);
 
-    if (!transactionAnalysis.allowed) {
-      console.log(`[API] /api/tx - Transaction blocked by monitoring system:`, {
-        riskScore: transactionAnalysis.riskScore,
-        flags: transactionAnalysis.flags
-      });
-      
-      // Auto-blacklist high-risk addresses or repeated offenders
-      if (transactionAnalysis.riskScore >= 100) {
-        console.log(`[API] /api/tx - Auto-blacklisting high-risk sender: ${senderAddress}`);
-        await TransactionMonitor.blacklistAddress(
-          senderAddress, 
-          `Auto-blacklisted: Risk score ${transactionAnalysis.riskScore}, Flags: ${transactionAnalysis.flags.join(', ')}`
-        );
-      } else if (transactionAnalysis.riskScore >= 80) {
-        // Check for repeated violations - greylist first, then blacklist
-        console.log(`[API] /api/tx - High-risk sender detected, adding to greylist: ${senderAddress}`);
-        await TransactionMonitor.greylistAddress(
-          senderAddress,
-          `Greylisted: Risk score ${transactionAnalysis.riskScore}, Flags: ${transactionAnalysis.flags.join(', ')}`
-        );
-      }
-      
-      return res.status(403).json(encryptionMiddleware.processResponse({
-        result: "error",
-        message: { 
-          error: new Error(`Transaction blocked: ${transactionAnalysis.flags.join(', ')}`) 
-        }
-      }, req.headers));
-    }
-
-    // Log transaction analysis for monitoring
-    if (transactionAnalysis.riskScore > 50) {
-      console.log(`[API] /api/tx - High-risk transaction allowed:`, {
-        sender: senderAddress,
-        receiver: receiverAddress,
-        amount: parsedAmount,
-        riskScore: transactionAnalysis.riskScore,
-        flags: transactionAnalysis.flags
-      });
-    }
-
-    // Validation
-    if (!senderAddress || typeof senderAddress !== 'string') {
-      return res.status(400).json(encryptionMiddleware.processResponse({
-        result: "error",
-        message: { error: new Error("Sender address is required and must be a string") }
-      }, req.headers));
-    }
-
-    if (!receiverAddress || typeof receiverAddress !== 'string') {
-      return res.status(400).json(encryptionMiddleware.processResponse({
-        result: "error",
-        message: { error: new Error("Receiver address is required and must be a string") }
-      }, req.headers));
-    }
-
-    if (!tokenMint || typeof tokenMint !== 'string') {
-      return res.status(400).json(encryptionMiddleware.processResponse({
-        result: "error",
-        message: { error: new Error("Token mint address is required and must be a string") }
-      }, req.headers));
-    }
-
-    if (!parsedAmount || typeof parsedAmount !== 'number' || parsedAmount <= 0) {
-      return res.status(400).json(encryptionMiddleware.processResponse({
-        result: "error",
-        message: { error: new Error("Amount is required and must be a positive number") }
-      }, req.headers));
-    }
-
-    if (parsedTransactionFee !== undefined && parsedTransactionFee !== null) {
-      if (typeof parsedTransactionFee !== 'number' || parsedTransactionFee <= 0) {
-        return res.status(400).json(encryptionMiddleware.processResponse({
-          result: "error",
-          message: { error: new Error("Transaction fee must be a positive number") }
-        }, req.headers));
-      }
-
-      if (!transactionFeeAddress || typeof transactionFeeAddress !== 'string') {
-        return res.status(400).json(encryptionMiddleware.processResponse({
-          result: "error",
-          message: { error: new Error("Transaction fee address is required when transaction fee is provided") }
-        }, req.headers));
-      }
-    }
-
-    if (narration !== undefined && narration !== null && typeof narration !== 'string') {
-      return res.status(400).json(encryptionMiddleware.processResponse({
-        result: "error",
-        message: { error: new Error("Narration must be a string") }
-      }, req.headers));
-    }
-
+    // Convert addresses to PublicKey objects
     let sender: PublicKey;
     let receiver: PublicKey;
     let mint: PublicKey;
-    let feeReceiver: PublicKey | null = null;
+    let feeReceiver: PublicKey | undefined;
 
     try {
       sender = new PublicKey(senderAddress);
@@ -381,14 +289,112 @@ async function txHandler(
     } catch {
       return res.status(400).json(encryptionMiddleware.processResponse({
         result: "error",
-        message: { error: new Error("Invalid public key format") }
+        message: ("Invalid public key format")
       }, req.headers));
     }
 
+    // Use the correct RPC endpoint from environment or default to mainnet
+    const rpcEndpoint = process.env.ALCHEMY || clusterApiUrl("mainnet-beta");
+    console.log(`[API] /api/tx - Using RPC endpoint: ${rpcEndpoint}`);
+
+    const connection = new Connection(rpcEndpoint, {
+      commitment: "confirmed",
+      confirmTransactionInitialTimeout: 60000, // 60 seconds
+    });
+
+    // Get Associated Token Addresses
+    const senderAta = await getAssociatedTokenAddress(mint, sender);
+    const receiverAta = await getAssociatedTokenAddress(mint, receiver);
+    let feeReceiverAta: PublicKey | null = null;
+    if (feeReceiver && parsedTransactionFee) {
+      feeReceiverAta = await getAssociatedTokenAddress(mint, feeReceiver);
+    }
+
+    // Track ATA creation costs to pass to sender
+    let ataCreationCount = 0;
+    let totalAtaCreationCost = 0;
+    let receiverNeedsAta = false; // Track specifically if receiver needs ATA
+
+    // Check if receiver needs ATA creation
+    const receiverAccountInfo = await connection.getAccountInfo(receiverAta);
+    if (!receiverAccountInfo) {
+      ataCreationCount++;
+      receiverNeedsAta = true; // Flag for farming detection
+      console.log(`[API] /api/tx - Receiver ATA needs creation (relayer will pay)`);
+    }
+
+    if (feeReceiverAta && feeReceiver) {
+      const feeReceiverAccountInfo = await connection.getAccountInfo(feeReceiverAta);
+      if (!feeReceiverAccountInfo) {
+        ataCreationCount++;
+        console.log(`[API] /api/tx - Fee receiver ATA needs creation (relayer will pay)`);
+      }
+    }
+
+    // ========================================
+    // STEP 4: ATA Farming Detection (if receiver needs ATA)
+    // ========================================
+    console.log(`[API] /api/tx - ATA Farming Detection: ${process.env.HELIUS_API_KEY ? 'ENABLED ✅' : 'DISABLED (no API key) ⚠️'}`);
+
+    // Only check if RECEIVER needs ATA creation (avoid unnecessary API calls)
+    if (receiverNeedsAta) {
+      console.log(`[API] /api/tx - 🔍 Receiver ATA needs creation - Running farming detection...`);
+      console.log(`[API] /api/tx - 🔍 Analyzing sender for ATA farming patterns...`);
+
+      try {
+        const farmingAnalysis = await getCachedAtaFarmingAnalysis(senderAddress);
+
+        console.log(`[API] /api/tx - Analysis complete:`, {
+          address: senderAddress.substring(0, 8) + '...',
+          riskScore: farmingAnalysis.riskScore,
+          isSuspicious: farmingAnalysis.isSuspicious,
+          flags: farmingAnalysis.flags,
+        });
+
+        // STRICT BLOCKING: Reject any wallet with suspicious patterns
+        if (farmingAnalysis.isSuspicious) {
+          console.log(`[API] /api/tx - 🚨 BLOCKING TRANSACTION - ATA farming pattern detected:`, {
+            address: senderAddress,
+            riskScore: farmingAnalysis.riskScore,
+            flags: farmingAnalysis.flags,
+            details: farmingAnalysis.details,
+          });
+
+          // ATA farming detected - add to Redis blacklist and block transaction
+          await addToRedisBlacklist(
+            senderAddress,
+            `ATA farming detected: Risk score ${farmingAnalysis.riskScore}, Flags: ${farmingAnalysis.flags.join(', ')}`
+          );
+
+          const errorMessage =
+            `Transaction blocked: Wallet has been flagged for suspicious account creation patterns. ` +
+            `Risk score: ${farmingAnalysis.riskScore}/100. ` +
+            `Detected patterns: ${farmingAnalysis.flags.join(', ')}. ` +
+            `If you believe this is an error, please contact support with your wallet address.`;
+
+          return res.status(403).json(
+            createSecurityErrorResponse(errorMessage)
+          );
+        }
+
+        console.log(`[API] /api/tx - ✅ No ATA farming patterns detected - proceeding with transaction`);
+
+      } catch (error) {
+        // (Fail-open to avoid blocking legitimate users due to API issues)
+        console.error(`[API] /api/tx - ⚠️ ATA farming analysis failed:`, error);
+        console.log(`[API] /api/tx - Proceeding with transaction despite analysis failure`);
+      }
+    } else {
+      console.log(`[API] /api/tx - ✅ Receiver already has ATA - Skipping farming detection (optimization)`);
+    }
+
+    // ========================================
+    // STEP 5: Setup Relayer Wallet
+    // ========================================
     if (!process.env.WALLET) {
       return res.status(500).json(encryptionMiddleware.processResponse({
         result: "error",
-        message: { error: new Error("Wallet environment variable not configured") }
+        message: "Something went wrong"
       }, req.headers));
     }
 
@@ -399,43 +405,84 @@ async function txHandler(
     } catch {
       return res.status(500).json(encryptionMiddleware.processResponse({
         result: "error",
-        message: { error: new Error("Invalid relayer wallet configuration") }
+        message: ("Invalid relayer wallet configuration")
       }, req.headers));
     }
 
-    // Use the correct RPC endpoint from environment or default to mainnet
-    const rpcEndpoint = process.env.ALCHEMY || clusterApiUrl("mainnet-beta");
-    console.log(`[API] /api/tx - Using RPC endpoint: ${rpcEndpoint}`);
-    
-    const connection = new Connection(rpcEndpoint, {
-      commitment: "confirmed",
-      confirmTransactionInitialTimeout: 60000, // 60 seconds
-    });
+    // ========================================
+    // STEP 6: Validation
+    // ========================================
+    if (!senderAddress || typeof senderAddress !== 'string') {
+      return res.status(400).json(encryptionMiddleware.processResponse({
+        result: "error",
+        message: ("Sender address is required and must be a string")
+      }, req.headers));
+    }
+
+    if (!receiverAddress || typeof receiverAddress !== 'string') {
+      return res.status(400).json(encryptionMiddleware.processResponse({
+        result: "error",
+        message: ("Receiver address is required and must be a string")
+      }, req.headers));
+    }
+
+    if (!tokenMint || typeof tokenMint !== 'string') {
+      return res.status(400).json(encryptionMiddleware.processResponse({
+        result: "error",
+        message: ("Token mint address is required and must be a string")
+      }, req.headers));
+    }
+
+    if (!parsedAmount || typeof parsedAmount !== 'number' || parsedAmount <= 0) {
+      return res.status(400).json(encryptionMiddleware.processResponse({
+        result: "error",
+        message: ("Amount is required and must be a positive number")
+      }, req.headers));
+    }
+
+    if (parsedTransactionFee !== undefined && parsedTransactionFee !== null) {
+      if (typeof parsedTransactionFee !== 'number' || parsedTransactionFee <= 0) {
+        return res.status(400).json(encryptionMiddleware.processResponse({
+          result: "error",
+          message: ("Transaction fee must be a positive number")
+        }, req.headers));
+      }
+
+      if (!transactionFeeAddress || typeof transactionFeeAddress !== 'string') {
+        return res.status(400).json(encryptionMiddleware.processResponse({
+          result: "error",
+          message: ("Transaction fee address is required when transaction fee is provided")
+        }, req.headers));
+      }
+    }
+
+    if (narration !== undefined && narration !== null && typeof narration !== 'string') {
+      return res.status(400).json(encryptionMiddleware.processResponse({
+        result: "error",
+        message: ("Narration must be a string")
+      }, req.headers));
+    }
+
+    // Variables already declared above
 
     // Detect network congestion and determine priority fee
     const congestionInfo = await detectNetworkCongestion(connection);
-    
+
     // Calculate estimated transaction cost
     const estimatedTotalCost = calculateTransactionCost(
-      congestionInfo.priorityFee, 
+      congestionInfo.priorityFee,
       congestionInfo.computeUnits
     );
 
     console.log(`[API] /api/tx - Estimated total transaction cost: ${estimatedTotalCost} lamports (${estimatedTotalCost / 1e9} SOL)`);
 
-    // Get Associated Token Addresses
-    const senderAta = await getAssociatedTokenAddress(mint, sender);
-    const receiverAta = await getAssociatedTokenAddress(mint, receiver);
-    let feeReceiverAta: PublicKey | null = null;
-    if (feeReceiver && parsedTransactionFee) {
-      feeReceiverAta = await getAssociatedTokenAddress(mint, feeReceiver);
-    }
+    // ATA creation check and farming detection already completed above
 
     const instructions: TransactionInstruction[] = [];
 
     // Add compute budget instructions for priority fees and compute units
     console.log(`[API] /api/tx - Adding compute budget instructions`);
-    
+
     // Set compute unit limit
     instructions.push(
       ComputeBudgetProgram.setComputeUnitLimit({
@@ -458,16 +505,30 @@ async function txHandler(
       return res.status(400).json(
         encryptionMiddleware.processResponse({
           result: "error",
-          message: { error: new Error("Sender ATA does not exist. Please create it first using the create-ata endpoint with proper authorization.") }
+          message: ("Sender ATA does not exist. Please create it first using the create-ata endpoint with proper authorization.")
         }, req.headers)
       );
     }
 
     console.log(`[API] /api/tx - Checking receiver ATA: ${receiverAta.toBase58()}`);
-    const receiverAccountInfo = await connection.getAccountInfo(receiverAta);
-    if (!receiverAccountInfo) {
+    const receiverAccountInfoCheck = await connection.getAccountInfo(receiverAta);
+    if (!receiverAccountInfoCheck) {
       console.log(`[API] /api/tx - Receiver ATA does not exist, adding creation instruction`);
-      // Only create receiver ATA (this is expected for legitimate transfers)
+
+      // COMMENTED OUT: Sender pays for ATA creation
+      // Relayer pays for ATA creation (original behavior)
+
+      // const ataRent = await connection.getMinimumBalanceForRentExemption(165);
+      // console.log(`[API] /api/tx - Adding SOL transfer for ATA creation: ${ataRent} lamports (${ataRent / 1e9} SOL)`);
+      // instructions.push(
+      //   SystemProgram.transfer({
+      //     fromPubkey: sender,
+      //     toPubkey: relayerWallet.publicKey,
+      //     lamports: ataRent,
+      //   })
+      // );
+
+      // Create receiver ATA (relayer pays)
       instructions.push(
         createAssociatedTokenAccountInstruction(
           relayerWallet.publicKey,
@@ -480,9 +541,24 @@ async function txHandler(
 
     if (feeReceiverAta && feeReceiver) {
       console.log(`[API] /api/tx - Checking fee receiver ATA: ${feeReceiverAta.toBase58()}`);
-      const feeReceiverAccountInfo = await connection.getAccountInfo(feeReceiverAta);
-      if (!feeReceiverAccountInfo) {
+      const feeReceiverAccountInfoCheck = await connection.getAccountInfo(feeReceiverAta);
+      if (!feeReceiverAccountInfoCheck) {
         console.log(`[API] /api/tx - Fee receiver ATA does not exist, adding creation instruction`);
+
+        // COMMENTED OUT: Sender pays for ATA creation
+        // Relayer pays for ATA creation (original behavior)
+
+        // const ataRent = await connection.getMinimumBalanceForRentExemption(165);
+        // console.log(`[API] /api/tx - Adding SOL transfer for fee receiver ATA creation: ${ataRent} lamports (${ataRent / 1e9} SOL)`);
+        // instructions.push(
+        //   SystemProgram.transfer({
+        //     fromPubkey: sender,
+        //     toPubkey: relayerWallet.publicKey,
+        //     lamports: ataRent,
+        //   })
+        // );
+
+        // Create fee receiver ATA (relayer pays)
         instructions.push(
           createAssociatedTokenAccountInstruction(
             relayerWallet.publicKey,
@@ -532,7 +608,7 @@ async function txHandler(
 
     // Create and configure transaction
     const transaction = new Transaction().add(...instructions);
-    
+
     console.log(`[API] /api/tx - Getting latest blockhash`);
     const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('finalized');
     transaction.recentBlockhash = blockhash;
@@ -566,6 +642,8 @@ async function txHandler(
         priorityFee: congestionInfo.priorityFee,
         networkCongestion: congestionInfo.level,
         estimatedTotalCost: estimatedTotalCost,
+        ataCreationCost: totalAtaCreationCost,
+        ataCreationCount: ataCreationCount,
       },
     };
 
@@ -573,6 +651,10 @@ async function txHandler(
     console.log(`[API] /api/tx - Network congestion: ${congestionInfo.level}`);
     console.log(`[API] /api/tx - Priority fee: ${congestionInfo.priorityFee} microlamports`);
     console.log(`[API] /api/tx - Estimated cost: ${estimatedTotalCost} lamports`);
+    if (ataCreationCount > 0) {
+      console.log(`[API] /api/tx - ATA creation cost (paid by sender): ${totalAtaCreationCost} lamports (${totalAtaCreationCost / 1e9} SOL)`);
+      console.log(`[API] /api/tx - Number of ATAs to create: ${ataCreationCount}`);
+    }
 
     return res.json(
       encryptionMiddleware.processResponse(successResponse, req.headers)
@@ -580,11 +662,11 @@ async function txHandler(
 
   } catch (error) {
     console.error(`[API] /api/tx - Error:`, error);
-    
+
     // Enhanced error handling for specific Solana errors
     if (error instanceof Error) {
       let errorMessage = error.message;
-      
+
       if (error.message.includes('insufficient funds')) {
         errorMessage = "Relayer has insufficient funds to pay for transaction fees";
       } else if (error.message.includes('blockhash not found')) {
@@ -596,11 +678,11 @@ async function txHandler(
       } else if (error.message.includes('TokenAccountNotFoundError')) {
         errorMessage = "Token account not found for the specified address";
       }
-      
+
       return res.status(500).json(
         encryptionMiddleware.processResponse({
           result: "error",
-          message: { error: new Error(errorMessage) }
+          message: (errorMessage)
         }, req.headers)
       );
     }
@@ -608,7 +690,7 @@ async function txHandler(
     return res.status(500).json(
       encryptionMiddleware.processResponse({
         result: "error",
-        message: { error: error as Error }
+        message: error as Error
       }, req.headers)
     );
   }

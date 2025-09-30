@@ -63,28 +63,29 @@ async function createAtaHandler(
             return res.status(401).json(createSecurityErrorResponse(securityValidation.error!));
         }
 
-        // Advanced security validation (request signing)
-        const advancedSecurityValidation = await advancedSecurity.validateRequest(req);
-        if (!advancedSecurityValidation.valid) {
-            console.log(`[API] /api/create-ata - Advanced security validation failed: ${advancedSecurityValidation.error}`);
-            return res.status(401).json(createSecurityErrorResponse(advancedSecurityValidation.error!));
-        }
-
-        console.log(`[API] /api/create-ata - Request body:`, req.body);
+        console.log(`[API] /api/create-ata - Request body (encrypted):`, req.body);
         
+        // ✅ STEP 1: Decrypt the body FIRST
         let processedBody;
         try {
             processedBody = encryptionMiddleware.processRequest(req.body, req.headers);
-            console.log(`[API] /api/create-ata - Processed request body:`, processedBody);
+            console.log(`[API] /api/create-ata - Decrypted request body:`, processedBody);
         } catch (error) {
             if (error instanceof Error && error.message === 'Encryption failed') {
-                console.log(`[API] /api/create-ata - Encryption failed during request processing`);
+                console.log(`[API] /api/create-ata - Decryption failed during request processing`);
                 return res.status(400).json({
                     result: "error",
                     message: { error: new Error("Encryption failed") }
                 });
             }
             throw error;
+        }
+        
+        // ✅ STEP 2: Validate signature with DECRYPTED body
+        const advancedSecurityValidation = await advancedSecurity.validateRequest(req, processedBody);
+        if (!advancedSecurityValidation.valid) {
+            console.log(`[API] /api/create-ata - Advanced security validation failed: ${advancedSecurityValidation.error}`);
+            return res.status(401).json(createSecurityErrorResponse(advancedSecurityValidation.error!));
         }
         
         const { ownerAddress, tokenMint, userSignature, message } = processedBody;

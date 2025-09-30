@@ -205,26 +205,27 @@ async function txHandler(
       return res.status(401).json(createSecurityErrorResponse(securityValidation.error!));
     }
 
-    // Advanced security validation (request signing)
-    const advancedSecurityValidation = await advancedSecurity.validateRequest(req);
-    if (!advancedSecurityValidation.valid) {
-      console.log(`[API] /api/tx - Advanced security validation failed: ${advancedSecurityValidation.error}`);
-      return res.status(401).json(createSecurityErrorResponse(advancedSecurityValidation.error!));
-    }
-
+    // ✅ STEP 1: Decrypt the body FIRST
     let processedBody;
     try {
       processedBody = encryptionMiddleware.processRequest(req.body, req.headers);
-      console.log(`[API] /api/tx - Processed request body:`, processedBody);
+      console.log(`[API] /api/tx - Decrypted request body:`, processedBody);
     } catch (error) {
       if (error instanceof Error && error.message === 'Encryption failed') {
-        console.log(`[API] /api/tx - Encryption failed during request processing`);
+        console.log(`[API] /api/tx - Decryption failed during request processing`);
         return res.status(400).json({
           result: "error",
-          message: { error: new Error("Encryption failed") }
+          message: { error: new Error("Decryption failed") }
         });
       }
       throw error;
+    }
+
+    // ✅ STEP 2: Validate signature with DECRYPTED body
+    const advancedSecurityValidation = await advancedSecurity.validateRequest(req, processedBody);
+    if (!advancedSecurityValidation.valid) {
+      console.log(`[API] /api/tx - Advanced security validation failed: ${advancedSecurityValidation.error}`);
+      return res.status(401).json(createSecurityErrorResponse(advancedSecurityValidation.error!));
     }
 
     const {

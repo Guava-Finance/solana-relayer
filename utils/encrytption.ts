@@ -83,13 +83,40 @@ export class EncryptionService {
         return result;
     }
 
+    // Helper function to parse decrypted values back to their original types
+    private parseDecryptedValue(value: string): any {
+        // Try to parse as number
+        if (/^-?\d+$/.test(value)) {
+            // Integer
+            const num = parseInt(value, 10);
+            if (!isNaN(num)) return num;
+        } else if (/^-?\d*\.\d+$/.test(value)) {
+            // Float
+            const num = parseFloat(value);
+            if (!isNaN(num)) return num;
+        }
+        
+        // Try to parse as boolean
+        if (value === 'true') return true;
+        if (value === 'false') return false;
+        
+        // Try to parse as null
+        if (value === 'null') return null;
+        
+        // Return as string if no other type matches
+        return value;
+    }
+
     // Decrypt a map/object
     private decryptMap(map: Record<string, any>): Record<string, any> {
         const result: Record<string, any> = {};
         for (const [key, value] of Object.entries(map)) {
             if (typeof value === 'string') {
                 try {
-                    result[key] = this.decryptString(value);
+                    const decrypted = this.decryptString(value);
+                    // Parse the decrypted value back to its original type
+                    const parsed = this.parseDecryptedValue(decrypted);
+                    result[key] = parsed;
                 } catch {
                     result[key] = value;
                 }

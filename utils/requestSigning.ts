@@ -22,17 +22,14 @@ let connectionAttempts = 0;
 
 async function connectRedis() {
   if (connectionAttempts >= 3) {
-    console.log('[RequestSigning] Max connection attempts reached, using fallback mode');
     return;
   }
   
   try {
     connectionAttempts++;
     await redis.connect();
-    console.log('[RequestSigning] Connected to Redis');
     redisConnected = true;
   } catch (error) {
-    console.error(`[RequestSigning] Failed to connect to Redis (attempt ${connectionAttempts}):`, error instanceof Error ? error.message : String(error));
     redisConnected = false;
     
     // Retry after delay
@@ -47,17 +44,14 @@ connectRedis();
 
 // Handle Redis errors
 redis.on('error', (error) => {
-  console.error('[RequestSigning] Redis error:', error.message);
   redisConnected = false;
 });
 
 redis.on('connect', () => {
-  console.log('[RequestSigning] Redis connected');
   redisConnected = true;
 });
 
 redis.on('disconnect', () => {
-  console.log('[RequestSigning] Redis disconnected');
   redisConnected = false;
 });
 
@@ -87,14 +81,10 @@ export class RequestSecurityManager {
       ? parseInt(process.env.MAX_TIMESTAMP_SKEW_MS) 
       : this.MAX_TIMESTAMP_SKEW;
     
-    console.log(`[Security] Timestamp validation: now=${now}, request=${timestamp}, skew=${timeDiff}ms, maxAllowed=${maxSkew}ms`);
-    
     if (timeDiff > maxSkew) {
-      console.log(`[Security] Request timestamp too old/future: ${timeDiff}ms skew exceeds ${maxSkew}ms limit`);
       return false;
     }
     
-    console.log(`[Security] Timestamp validation passed: ${timeDiff}ms skew within ${maxSkew}ms limit`);
     return true;
   }
 
@@ -108,16 +98,15 @@ export class RequestSecurityManager {
       // Check if nonce already used
       const exists = await redis.exists(key);
       if (exists) {
-        console.log(`[Security] Nonce replay attack detected: ${nonce}`);
         return false;
       }
       
       // Mark nonce as used
-      await redis.setEx(key, Math.ceil(this.NONCE_EXPIRY / 1000), 'used');
+      const expirySeconds = Math.ceil(this.NONCE_EXPIRY / 1000);
+      await redis.setEx(key, expirySeconds, 'used');
       return true;
       
     } catch (error) {
-      console.error('[Security] Nonce validation error:', error);
       return false;
     }
   }
@@ -152,23 +141,22 @@ export class RequestSecurityManager {
     const expectedSignature = this.generateRequestSignature(
       method, path, body, timestamp, nonce, secretKey
     );
-    
+
     // Use timing-safe comparison
     try {
       const sigBuffer = Buffer.from(signature, 'hex');
       const expectedBuffer = Buffer.from(expectedSignature, 'hex');
-      
+
       if (sigBuffer.length !== expectedBuffer.length) {
         return false;
       }
-      
+
       // Convert to Uint8Array for timingSafeEqual
       return crypto.timingSafeEqual(
         new Uint8Array(sigBuffer),
         new Uint8Array(expectedBuffer)
       );
     } catch (error) {
-      console.error('[Security] Signature validation error:', error);
       return false;
     }
   }
@@ -179,16 +167,13 @@ export class RequestSecurityManager {
  */
 export function createAdvancedSecurityMiddleware() {
   return {
-    validateRequest: async (req: any): Promise<{ valid: boolean; error?: string }> => {
+    validateRequest: async (req: any, decryptedBody?: any): Promise<{ valid: boolean; error?: string }> => {
       // Check if request signing is enabled
       const isRequestSigningEnabled = process.env.ENABLE_REQUEST_SIGNING === 'true';
       
       if (!isRequestSigningEnabled) {
-        console.log('[RequestSigning] Request signing is disabled, skipping validation');
         return { valid: true };
       }
-
-      console.log('[RequestSigning] Request signing is enabled, validating request');
 
       const { 
         'x-timestamp': timestamp,
@@ -198,25 +183,27 @@ export function createAdvancedSecurityMiddleware() {
       } = req.headers;
 
       // Validate required headers
-      if (!timestamp || !nonce || !signature || !clientId) {
-        console.log('[RequestSigning] Missing required security headers');
-        return { valid: false, error: 'Missing security headers' };
+      const missingHeaders = [];
+      if (!timestamp) missingHeaders.push('x-timestamp');
+      if (!nonce) missingHeaders.push('x-nonce');
+      if (!signature) missingHeaders.push('x-signature');
+      if (!clientId) missingHeaders.push('x-client-id');
+      
+      if (missingHeaders.length > 0) {
+        return { valid: false, error: `Missing security headers: ${missingHeaders.join(', ')}` };
       }
 
       // Validate timestamp
       if (!RequestSecurityManager.validateTimestamp(parseInt(timestamp))) {
-        console.log('[RequestSigning] Invalid timestamp validation failed');
         return { valid: false, error: 'Invalid timestamp' };
       }
 
       // Validate nonce (only if Redis is available)
       try {
         if (!(await RequestSecurityManager.validateAndConsumeNonce(nonce, clientId))) {
-          console.log('[RequestSigning] Nonce validation failed');
           return { valid: false, error: 'Invalid or reused nonce' };
         }
       } catch (error) {
-        console.log('[RequestSigning] Nonce validation error (Redis may be unavailable):', error);
         // In production, you might want to fail here, but for development we'll continue
         if (process.env.NODE_ENV === 'production') {
           return { valid: false, error: 'Nonce validation service unavailable' };
@@ -225,7 +212,19 @@ export function createAdvancedSecurityMiddleware() {
 
       // Validate signature
       const secretKey = process.env.REQUEST_SIGNING_SECRET || 'default-secret';
-      const bodyString = JSON.stringify(req.body);
+      
+      // Use decrypted body if provided, otherwise use raw body
+      const bodyToValidate = decryptedBody || req.body;
+      
+      // Sort keys alphabetically to match client-side sorting
+      const sortedBody = Object.keys(bodyToValidate)
+        .sort()
+        .reduce((acc: any, key: string) => {
+          acc[key] = bodyToValidate[key];
+          return acc;
+        }, {});
+      
+      const bodyString = JSON.stringify(sortedBody);
       
       if (!RequestSecurityManager.validateRequestSignature(
         req.method,
@@ -236,11 +235,9 @@ export function createAdvancedSecurityMiddleware() {
         signature,
         secretKey
       )) {
-        console.log('[RequestSigning] Signature validation failed');
         return { valid: false, error: 'Invalid request signature' };
       }
 
-      console.log('[RequestSigning] Request validation successful');
       return { valid: true };
     }
   };

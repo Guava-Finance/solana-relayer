@@ -26,12 +26,12 @@ import { getCachedAtaFarmingAnalysis } from "../../utils/ataFarmingDetector";
 
 const MEMO_PROGRAM_ID = new PublicKey("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr");
 
-// Priority fee configuration based on network congestion
+// Priority fee configuration based on network congestion - Optimized for competitive speed
 const PRIORITY_FEE_CONFIG = {
-  LOW_CONGESTION: 1000,      // 0.000001 SOL (1,000 microlamports)
-  MEDIUM_CONGESTION: 10000,  // 0.00001 SOL (10,000 microlamports)
-  HIGH_CONGESTION: 50000,    // 0.00005 SOL (50,000 microlamports)
-  EXTREME_CONGESTION: 100000 // 0.0001 SOL (100,000 microlamports)
+  LOW_CONGESTION: 5000,      // 0.000005 SOL (5,000 microlamports) - 5x increase
+  MEDIUM_CONGESTION: 25000,  // 0.000025 SOL (25,000 microlamports) - 2.5x increase
+  HIGH_CONGESTION: 75000,    // 0.000075 SOL (75,000 microlamports) - 1.5x increase
+  EXTREME_CONGESTION: 150000 // 0.00015 SOL (150,000 microlamports) - 1.5x increase
 };
 
 // Compute unit configuration
@@ -115,12 +115,17 @@ async function detectNetworkCongestion(connection: Connection): Promise<{
       });
 
       if (recentFees.length > 0) {
-        // Calculate 75th percentile of recent fees for better success rate
+        // Calculate 90th percentile of recent fees for competitive speed
         const fees = recentFees.map(f => f.prioritizationFee).sort((a, b) => a - b);
-        const percentile75Index = Math.floor(fees.length * 0.75);
-        suggestedPriorityFee = Math.max(fees[percentile75Index], PRIORITY_FEE_CONFIG.LOW_CONGESTION);
+        const percentile90Index = Math.floor(fees.length * 0.9);
+        const percentile95Index = Math.floor(fees.length * 0.95);
+        
+        // Use 95th percentile for aggressive speed, with 90th as minimum
+        const aggressiveFee = fees[percentile95Index] || fees[percentile90Index];
+        suggestedPriorityFee = Math.max(aggressiveFee, PRIORITY_FEE_CONFIG.LOW_CONGESTION);
 
-        console.log(`[CONGESTION] Recent priority fees (75th percentile): ${suggestedPriorityFee} microlamports`);
+        console.log(`[CONGESTION] Recent priority fees (95th percentile): ${suggestedPriorityFee} microlamports`);
+        console.log(`[CONGESTION] Fee range: min=${Math.min(...fees)}, max=${Math.max(...fees)}, median=${fees[Math.floor(fees.length / 2)]}`);
       }
     } catch (error) {
       console.log(`[CONGESTION] Could not fetch recent prioritization fees:`, error);
@@ -131,17 +136,17 @@ async function detectNetworkCongestion(connection: Connection): Promise<{
     let finalPriorityFee: number;
     let computeUnits: number;
 
-    // Network congestion heuristics
-    if (avgSlotTime > 0.8 || avgTxPerSlot > 3000) {
-      // High congestion: slow slot times or high transaction volume
+    // Network congestion heuristics - More aggressive thresholds for competitive speed
+    if (avgSlotTime > 0.7 || avgTxPerSlot > 2500) {
+      // Extreme congestion: slow slot times or high transaction volume
       congestionLevel = 'extreme';
-      finalPriorityFee = Math.max(suggestedPriorityFee, PRIORITY_FEE_CONFIG.EXTREME_CONGESTION);
+      finalPriorityFee = Math.max(suggestedPriorityFee * 1.2, PRIORITY_FEE_CONFIG.EXTREME_CONGESTION); // 20% boost
       computeUnits = COMPUTE_UNIT_CONFIG.COMPLEX_TX_UNITS;
-    } else if (avgSlotTime > 0.6 || avgTxPerSlot > 2000) {
+    } else if (avgSlotTime > 0.55 || avgTxPerSlot > 1800) {
       congestionLevel = 'high';
-      finalPriorityFee = Math.max(suggestedPriorityFee, PRIORITY_FEE_CONFIG.HIGH_CONGESTION);
+      finalPriorityFee = Math.max(suggestedPriorityFee * 1.1, PRIORITY_FEE_CONFIG.HIGH_CONGESTION); // 10% boost
       computeUnits = COMPUTE_UNIT_CONFIG.DEFAULT_UNITS;
-    } else if (avgSlotTime > 0.5 || avgTxPerSlot > 1000) {
+    } else if (avgSlotTime > 0.45 || avgTxPerSlot > 800) {
       congestionLevel = 'medium';
       finalPriorityFee = Math.max(suggestedPriorityFee, PRIORITY_FEE_CONFIG.MEDIUM_CONGESTION);
       computeUnits = COMPUTE_UNIT_CONFIG.DEFAULT_UNITS;
@@ -151,8 +156,12 @@ async function detectNetworkCongestion(connection: Connection): Promise<{
       computeUnits = COMPUTE_UNIT_CONFIG.TOKEN_TRANSFER_UNITS;
     }
 
+    // Apply safety cap to prevent extremely high fees (max 0.001 SOL = 1,000,000 microlamports)
+    const maxPriorityFee = 1000000; // 0.001 SOL cap
+    finalPriorityFee = Math.min(finalPriorityFee, maxPriorityFee);
+
     console.log(`[CONGESTION] Network congestion level: ${congestionLevel}`);
-    console.log(`[CONGESTION] Applied priority fee: ${finalPriorityFee} microlamports`);
+    console.log(`[CONGESTION] Applied priority fee: ${finalPriorityFee} microlamports (${(finalPriorityFee / 1e9).toFixed(9)} SOL)`);
     console.log(`[CONGESTION] Compute units: ${computeUnits}`);
 
     return {

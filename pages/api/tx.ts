@@ -22,7 +22,7 @@ import { validateSecurity, createSecurityErrorResponse, createEncryptedUnauthori
 import { createRateLimiter, RateLimitConfigs } from "../../utils/rateLimiter";
 import { validateRedisBlacklist, addToRedisBlacklist } from "../../utils/redisBlacklist";
 import { createAdvancedSecurityMiddleware } from "../../utils/requestSigning";
-import { getCachedAtaFarmingAnalysis } from "../../utils/ataFarmingDetector";
+// import { getCachedAtaFarmingAnalysis } from "../../utils/ataFarmingDetector";
 
 const MEMO_PROGRAM_ID = new PublicKey("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr");
 

@@ -17,7 +17,7 @@ import { validateSecurity, createSecurityErrorResponse, createEncryptedUnauthori
 import { createRateLimiter, RateLimitConfigs } from "../../utils/rateLimiter";
 import { validateRedisBlacklist, addToRedisBlacklist } from "../../utils/redisBlacklist";
 import { createAdvancedSecurityMiddleware } from "../../utils/requestSigning";
-import { getCachedAtaFarmingAnalysis } from "../../utils/ataFarmingDetector";
+// import { getCachedAtaFarmingAnalysis } from "../../utils/ataFarmingDetector";
 
 type NetworkCongestion = 'low' | 'medium' | 'high' | 'extreme';
 
@@ -239,26 +239,27 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse<
     const sender = new PublicKey(senderAddress);
     const inMint = new PublicKey(inputMint);
 
-    // Ensure sender USDC ATA exists; if not, run farming detection then create it
+    // Ensure sender USDC ATA exists; if not, create it (ATA farming detection commented out)
     const senderUsdcAta = await getAssociatedTokenAddress(USDC_MINT, sender);
     const senderUsdcInfo = await connection.getAccountInfo(senderUsdcAta);
     console.log(`[SWAP] Sender USDC ATA: ${senderUsdcAta.toBase58()} exists=${!!senderUsdcInfo}`);
 
     if (!senderUsdcInfo) {
-      try {
-        const analysis = await getCachedAtaFarmingAnalysis(senderAddress);
-        console.log(`[SWAP] ATA farming analysis:`, analysis);
-        if (analysis.isSuspicious) {
-          await addToRedisBlacklist(
-            senderAddress,
-            `ATA farming detected: Risk score ${analysis.riskScore}, Flags: ${analysis.flags.join(", ")}`
-          );
-          return res.status(403).json({
-            result: "error",
-            message: "Blocked due to suspicious ATA farming behavior."
-          });
-        }
-      } catch { }
+      // ATA farming detection commented out
+      // try {
+      //   const analysis = await getCachedAtaFarmingAnalysis(senderAddress);
+      //   console.log(`[SWAP] ATA farming analysis:`, analysis);
+      //   if (analysis.isSuspicious) {
+      //     await addToRedisBlacklist(
+      //       senderAddress,
+      //       `ATA farming detected: Risk score ${analysis.riskScore}, Flags: ${analysis.flags.join(", ")}`
+      //     );
+      //     return res.status(403).json({
+      //       result: "error",
+      //       message: "Blocked due to suspicious ATA farming behavior."
+      //     });
+      //   }
+      // } catch { }
 
       const ix = createAssociatedTokenAccountInstruction(
         relayerWallet.publicKey,

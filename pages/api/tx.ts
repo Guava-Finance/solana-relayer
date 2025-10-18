@@ -341,61 +341,61 @@ async function txHandler(
     }
 
     // ========================================
-    // STEP 4: ATA Farming Detection (if receiver needs ATA)
+    // STEP 4: ATA Farming Detection (if receiver needs ATA) - COMMENTED OUT
     // ========================================
-    console.log(`[API] /api/tx - ATA Farming Detection: ${process.env.HELIUS_API_KEY ? 'ENABLED ✅' : 'DISABLED (no API key) ⚠️'}`);
+    // console.log(`[API] /api/tx - ATA Farming Detection: ${process.env.HELIUS_API_KEY ? 'ENABLED ✅' : 'DISABLED (no API key) ⚠️'}`);
 
-    // Only check if RECEIVER needs ATA creation (avoid unnecessary API calls)
-    if (receiverNeedsAta) {
-      console.log(`[API] /api/tx - 🔍 Receiver ATA needs creation - Running farming detection...`);
-      console.log(`[API] /api/tx - 🔍 Analyzing sender for ATA farming patterns...`);
+    // // Only check if RECEIVER needs ATA creation (avoid unnecessary API calls)
+    // if (receiverNeedsAta) {
+    //   console.log(`[API] /api/tx - 🔍 Receiver ATA needs creation - Running farming detection...`);
+    //   console.log(`[API] /api/tx - 🔍 Analyzing sender for ATA farming patterns...`);
 
-      try {
-        const farmingAnalysis = await getCachedAtaFarmingAnalysis(senderAddress);
+    //   try {
+    //     const farmingAnalysis = await getCachedAtaFarmingAnalysis(senderAddress);
 
-        console.log(`[API] /api/tx - Analysis complete:`, {
-          address: senderAddress.substring(0, 8) + '...',
-          riskScore: farmingAnalysis.riskScore,
-          isSuspicious: farmingAnalysis.isSuspicious,
-          flags: farmingAnalysis.flags,
-        });
+    //     console.log(`[API] /api/tx - Analysis complete:`, {
+    //       address: senderAddress.substring(0, 8) + '...',
+    //       riskScore: farmingAnalysis.riskScore,
+    //       isSuspicious: farmingAnalysis.isSuspicious,
+    //       flags: farmingAnalysis.flags,
+    //     });
 
-        // STRICT BLOCKING: Reject any wallet with suspicious patterns
-        if (farmingAnalysis.isSuspicious) {
-          console.log(`[API] /api/tx - 🚨 BLOCKING TRANSACTION - ATA farming pattern detected:`, {
-            address: senderAddress,
-            riskScore: farmingAnalysis.riskScore,
-            flags: farmingAnalysis.flags,
-            details: farmingAnalysis.details,
-          });
+    //     // STRICT BLOCKING: Reject any wallet with suspicious patterns
+    //     if (farmingAnalysis.isSuspicious) {
+    //       console.log(`[API] /api/tx - 🚨 BLOCKING TRANSACTION - ATA farming pattern detected:`, {
+    //         address: senderAddress,
+    //         riskScore: farmingAnalysis.riskScore,
+    //         flags: farmingAnalysis.flags,
+    //         details: farmingAnalysis.details,
+    //       });
 
-          // ATA farming detected - add to Redis blacklist and block transaction
-          await addToRedisBlacklist(
-            senderAddress,
-            `ATA farming detected: Risk score ${farmingAnalysis.riskScore}, Flags: ${farmingAnalysis.flags.join(', ')}`
-          );
+    //       // ATA farming detected - add to Redis blacklist and block transaction
+    //       await addToRedisBlacklist(
+    //         senderAddress,
+    //         `ATA farming detected: Risk score ${farmingAnalysis.riskScore}, Flags: ${farmingAnalysis.flags.join(', ')}`
+    //       );
 
-          const errorMessage =
-            `Transaction blocked: Wallet has been flagged for suspicious account creation patterns. ` +
-            `Risk score: ${farmingAnalysis.riskScore}/100. ` +
-            `Detected patterns: ${farmingAnalysis.flags.join(', ')}. ` +
-            `If you believe this is an error, please contact support with your wallet address.`;
+    //       const errorMessage =
+    //         `Transaction blocked: Wallet has been flagged for suspicious account creation patterns. ` +
+    //         `Risk score: ${farmingAnalysis.riskScore}/100. ` +
+    //         `Detected patterns: ${farmingAnalysis.flags.join(', ')}. ` +
+    //         `If you believe this is an error, please contact support with your wallet address.`;
 
-          return res.status(403).json(
-            createSecurityErrorResponse(errorMessage)
-          );
-        }
+    //       return res.status(403).json(
+    //         createSecurityErrorResponse(errorMessage)
+    //       );
+    //     }
 
-        console.log(`[API] /api/tx - ✅ No ATA farming patterns detected - proceeding with transaction`);
+    //     console.log(`[API] /api/tx - ✅ No ATA farming patterns detected - proceeding with transaction`);
 
-      } catch (error) {
-        // (Fail-open to avoid blocking legitimate users due to API issues)
-        console.error(`[API] /api/tx - ⚠️ ATA farming analysis failed:`, error);
-        console.log(`[API] /api/tx - Proceeding with transaction despite analysis failure`);
-      }
-    } else {
-      console.log(`[API] /api/tx - ✅ Receiver already has ATA - Skipping farming detection (optimization)`);
-    }
+    //   } catch (error) {
+    //     // (Fail-open to avoid blocking legitimate users due to API issues)
+    //     console.error(`[API] /api/tx - ⚠️ ATA farming analysis failed:`, error);
+    //     console.log(`[API] /api/tx - Proceeding with transaction despite analysis failure`);
+    //   }
+    // } else {
+    //   console.log(`[API] /api/tx - ✅ Receiver already has ATA - Skipping farming detection (optimization)`);
+    // }
 
     // ========================================
     // STEP 5: Setup Relayer Wallet

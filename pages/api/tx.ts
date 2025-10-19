@@ -18,10 +18,10 @@ import {
 import base58 from "bs58";
 import type { NextApiRequest, NextApiResponse } from "next";
 import { createEncryptionMiddleware } from "../../utils/encrytption";
-import { validateSecurity, createSecurityErrorResponse, createEncryptedUnauthorizedResponse } from "../../utils/security";
+// import { validateSecurity, createSecurityErrorResponse, createEncryptedUnauthorizedResponse } from "../../utils/security";
 // import { createRateLimiter, RateLimitConfigs } from "../../utils/rateLimiter";
 // import { validateRedisBlacklist, addToRedisBlacklist } from "../../utils/redisBlacklist";
-import { createAdvancedSecurityMiddleware } from "../../utils/requestSigning";
+// import { createAdvancedSecurityMiddleware } from "../../utils/requestSigning";
 // import { getCachedAtaFarmingAnalysis } from "../../utils/ataFarmingDetector";
 
 const MEMO_PROGRAM_ID = new PublicKey("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr");
@@ -65,7 +65,7 @@ const encryptionMiddleware = createEncryptionMiddleware(
 );
 
 // const rateLimiter = createRateLimiter(RateLimitConfigs.TRANSACTION);
-const advancedSecurity = createAdvancedSecurityMiddleware();
+// const advancedSecurity = createAdvancedSecurityMiddleware();
 
 /**
  * Detect network congestion based on recent block production and fee levels
@@ -210,12 +210,12 @@ async function txHandler(
       });
     }
 
-    // Security validation
-    const securityValidation = validateSecurity(req);
-    if (!securityValidation.isValid) {
-      console.log(`[API] /api/tx - Security validation failed: ${securityValidation.error}`);
-      return res.status(401).json(createSecurityErrorResponse(securityValidation.error!));
-    }
+    // Security validation - COMMENTED OUT
+    // const securityValidation = validateSecurity(req);
+    // if (!securityValidation.isValid) {
+    //   console.log(`[API] /api/tx - Security validation failed: ${securityValidation.error}`);
+    //   return res.status(401).json(createSecurityErrorResponse(securityValidation.error!));
+    // }
 
     // ✅ STEP 1: Decrypt the body FIRST
     let processedBody;
@@ -233,12 +233,12 @@ async function txHandler(
       throw error;
     }
 
-    // ✅ STEP 2: Validate signature with DECRYPTED body
-    const advancedSecurityValidation = await advancedSecurity.validateRequest(req, processedBody);
-    if (!advancedSecurityValidation.valid) {
-      console.log(`[API] /api/tx - Advanced security validation failed: ${advancedSecurityValidation.error}`);
-      return res.status(401).json(createEncryptedUnauthorizedResponse());
-    }
+    // ✅ STEP 2: Validate signature with DECRYPTED body - COMMENTED OUT
+    // const advancedSecurityValidation = await advancedSecurity.validateRequest(req, processedBody);
+    // if (!advancedSecurityValidation.valid) {
+    //   console.log(`[API] /api/tx - Advanced security validation failed: ${advancedSecurityValidation.error}`);
+    //   return res.status(401).json(createEncryptedUnauthorizedResponse());
+    // }
 
     const {
       senderAddress,

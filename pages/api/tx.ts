@@ -333,17 +333,21 @@ async function txHandler(
       console.log(`[API] /api/tx - Receiver ATA needs creation (cost will be added to transaction fee)`);
     }
 
-    if (feeReceiverAta && feeReceiver) {
-      const feeReceiverAccountInfo = await connection.getAccountInfo(feeReceiverAta);
-      if (!feeReceiverAccountInfo) {
-        ataCreationCount++;
-        console.log(`[API] /api/tx - Fee receiver ATA needs creation (cost will be added to transaction fee)`);
-      }
-    }
-
     // Calculate ATA creation cost (rent exemption for token account = 2039280 lamports)
     const ataRentExemption = 2039280; // lamports
     totalAtaCreationCost = ataCreationCount * ataRentExemption;
+
+    // Calculate USDC equivalent of ATA creation cost
+    let ataCreationCostInUsdc = 0;
+    if (totalAtaCreationCost > 0) {
+      // Convert SOL cost to USDC equivalent
+      // Using current market rate: 1 SOL = $200.56 USDC
+      const solToUsdcRate = 200.56; // Current market rate
+      const solAmount = totalAtaCreationCost / 1e9; // Convert lamports to SOL
+      ataCreationCostInUsdc = solAmount * solToUsdcRate;
+      
+      console.log(`[API] /api/tx - ATA creation cost: ${totalAtaCreationCost} lamports (${solAmount} SOL) ≈ ${ataCreationCostInUsdc} USDC`);
+    }
 
     // Check if this is a USDC transaction and verify sender has enough USDC balance
     if (mint.equals(USDC_MINT)) {
@@ -361,10 +365,10 @@ async function txHandler(
 
       // Get USDC balance
       const senderUsdcBalance = await connection.getTokenAccountBalance(senderUsdcAta);
-      const requiredAmount = parsedAmount + (parsedTransactionFee || 0) + (totalAtaCreationCost / 1e6); // Convert lamports to USDC (6 decimals)
+      const requiredAmount = parsedAmount + (parsedTransactionFee || 0) + ataCreationCostInUsdc; // Use the calculated USDC equivalent
       
       console.log(`[API] /api/tx - Sender USDC balance: ${senderUsdcBalance.value.uiAmount} USDC`);
-      console.log(`[API] /api/tx - Required amount: ${requiredAmount} USDC (including ATA creation cost: ${totalAtaCreationCost / 1e6} USDC)`);
+      console.log(`[API] /api/tx - Required amount: ${requiredAmount} USDC (including ATA creation cost: ${ataCreationCostInUsdc} USDC)`);
       
       if (senderUsdcBalance.value.uiAmount === null || senderUsdcBalance.value.uiAmount < requiredAmount) {
         return res.status(400).json(encryptionMiddleware.processResponse({
@@ -374,44 +378,33 @@ async function txHandler(
       }
     }
 
-    // Calculate USDC equivalent of ATA creation cost for non-USDC transactions
-    let ataCreationCostInUsdc = 0;
-    if (!mint.equals(USDC_MINT) && totalAtaCreationCost > 0) {
-      // For non-USDC transactions, we need to get SOL price and convert to USDC
-      // For now, using a fixed conversion rate (this should be dynamic in production)
-      // 1 SOL ≈ 100 USDC (this is a placeholder - should use price oracle)
-      const solToUsdcRate = 100; // This should be fetched from a price oracle
-      const solAmount = totalAtaCreationCost / 1e9; // Convert lamports to SOL
-      ataCreationCostInUsdc = solAmount * solToUsdcRate;
-      
-      console.log(`[API] /api/tx - ATA creation cost: ${totalAtaCreationCost} lamports (${solAmount} SOL) ≈ ${ataCreationCostInUsdc} USDC`);
-    }
-
     // Check USDC balance for all transactions (sender must have USDC for ATA creation costs)
-    console.log(`[API] /api/tx - Checking USDC balance for sender...`);
-    
-    const senderUsdcAta = await getAssociatedTokenAddress(USDC_MINT, sender);
-    const senderUsdcAccountInfo = await connection.getAccountInfo(senderUsdcAta);
-    
-    if (!senderUsdcAccountInfo) {
-      return res.status(400).json(encryptionMiddleware.processResponse({
-        result: "error",
-        message: "Sender does not have a USDC account. Please create one first."
-      }, req.headers));
-    }
+    if (!mint.equals(USDC_MINT)) {
+      console.log(`[API] /api/tx - Checking USDC balance for sender...`);
+      
+      const senderUsdcAta = await getAssociatedTokenAddress(USDC_MINT, sender);
+      const senderUsdcAccountInfo = await connection.getAccountInfo(senderUsdcAta);
+      
+      if (!senderUsdcAccountInfo) {
+        return res.status(400).json(encryptionMiddleware.processResponse({
+          result: "error",
+          message: "Sender does not have a USDC account. Please create one first."
+        }, req.headers));
+      }
 
-    // Get USDC balance
-    const senderUsdcBalance = await connection.getTokenAccountBalance(senderUsdcAta);
-    const requiredUsdcAmount = (parsedTransactionFee || 0) + ataCreationCostInUsdc;
-    
-    console.log(`[API] /api/tx - Sender USDC balance: ${senderUsdcBalance.value.uiAmount} USDC`);
-    console.log(`[API] /api/tx - Required USDC amount: ${requiredUsdcAmount} USDC (transaction fee: ${parsedTransactionFee || 0}, ATA creation cost: ${ataCreationCostInUsdc})`);
-    
-    if (senderUsdcBalance.value.uiAmount === null || senderUsdcBalance.value.uiAmount < requiredUsdcAmount) {
-      return res.status(400).json(encryptionMiddleware.processResponse({
-        result: "error",
-        message: `Insufficient USDC balance. Required: ${requiredUsdcAmount} USDC (transaction fee: ${parsedTransactionFee || 0}, ATA creation cost: ${ataCreationCostInUsdc}), Available: ${senderUsdcBalance.value.uiAmount || 0} USDC`
-      }, req.headers));
+      // Get USDC balance
+      const senderUsdcBalance = await connection.getTokenAccountBalance(senderUsdcAta);
+      const requiredUsdcAmount = (parsedTransactionFee || 0) + ataCreationCostInUsdc;
+      
+      console.log(`[API] /api/tx - Sender USDC balance: ${senderUsdcBalance.value.uiAmount} USDC`);
+      console.log(`[API] /api/tx - Required USDC amount: ${requiredUsdcAmount} USDC (transaction fee: ${parsedTransactionFee || 0}, ATA creation cost: ${ataCreationCostInUsdc})`);
+      
+      if (senderUsdcBalance.value.uiAmount === null || senderUsdcBalance.value.uiAmount < requiredUsdcAmount) {
+        return res.status(400).json(encryptionMiddleware.processResponse({
+          result: "error",
+          message: `Insufficient USDC balance. Required: ${requiredUsdcAmount} USDC (transaction fee: ${parsedTransactionFee || 0}, ATA creation cost: ${ataCreationCostInUsdc}), Available: ${senderUsdcBalance.value.uiAmount || 0} USDC`
+        }, req.headers));
+      }
     }
 
     // ========================================
@@ -608,7 +601,7 @@ async function txHandler(
         )
       );
 
-      // Add USDC transfer for ATA creation cost if needed
+      // Add USDC transfer for ATA creation cost
       if (ataCreationCostInUsdc > 0) {
         const senderUsdcAta = await getAssociatedTokenAddress(USDC_MINT, sender);
         const relayerUsdcAta = await getAssociatedTokenAddress(USDC_MINT, relayerWallet.publicKey);
@@ -622,40 +615,6 @@ async function txHandler(
             ataCreationCostInUsdc * 1e6 // Convert to USDC units (6 decimals)
           )
         );
-      }
-    }
-
-    if (feeReceiverAta && feeReceiver) {
-      console.log(`[API] /api/tx - Checking fee receiver ATA: ${feeReceiverAta.toBase58()}`);
-      const feeReceiverAccountInfoCheck = await connection.getAccountInfo(feeReceiverAta);
-      if (!feeReceiverAccountInfoCheck) {
-        console.log(`[API] /api/tx - Fee receiver ATA does not exist, adding creation instruction`);
-
-        // Create fee receiver ATA (relayer pays rent, sender pays via USDC transfer)
-        instructions.push(
-          createAssociatedTokenAccountInstruction(
-            relayerWallet.publicKey,
-            feeReceiverAta,
-            feeReceiver,
-            mint
-          )
-        );
-
-        // Add USDC transfer for ATA creation cost if needed
-        if (ataCreationCostInUsdc > 0) {
-          const senderUsdcAta = await getAssociatedTokenAddress(USDC_MINT, sender);
-          const relayerUsdcAta = await getAssociatedTokenAddress(USDC_MINT, relayerWallet.publicKey);
-          
-          console.log(`[API] /api/tx - Adding USDC transfer for fee receiver ATA creation: ${ataCreationCostInUsdc} USDC`);
-          instructions.push(
-            createTransferInstruction(
-              senderUsdcAta,
-              relayerUsdcAta,
-              sender,
-              ataCreationCostInUsdc * 1e6 // Convert to USDC units (6 decimals)
-            )
-          );
-        }
       }
     }
 

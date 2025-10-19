@@ -19,12 +19,13 @@ import base58 from "bs58";
 import type { NextApiRequest, NextApiResponse } from "next";
 import { createEncryptionMiddleware } from "../../utils/encrytption";
 import { validateSecurity, createSecurityErrorResponse, createEncryptedUnauthorizedResponse } from "../../utils/security";
-import { createRateLimiter, RateLimitConfigs } from "../../utils/rateLimiter";
-import { validateRedisBlacklist, addToRedisBlacklist } from "../../utils/redisBlacklist";
+// import { createRateLimiter, RateLimitConfigs } from "../../utils/rateLimiter";
+// import { validateRedisBlacklist, addToRedisBlacklist } from "../../utils/redisBlacklist";
 import { createAdvancedSecurityMiddleware } from "../../utils/requestSigning";
 // import { getCachedAtaFarmingAnalysis } from "../../utils/ataFarmingDetector";
 
 const MEMO_PROGRAM_ID = new PublicKey("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr");
+const USDC_MINT = new PublicKey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"); // USDC mint address
 
 // Priority fee configuration based on network congestion - Optimized for competitive speed
 const PRIORITY_FEE_CONFIG = {
@@ -63,7 +64,7 @@ const encryptionMiddleware = createEncryptionMiddleware(
   process.env.AES_ENCRYPTION_IV || 'default-iv-16b!!'
 );
 
-const rateLimiter = createRateLimiter(RateLimitConfigs.TRANSACTION);
+// const rateLimiter = createRateLimiter(RateLimitConfigs.TRANSACTION);
 const advancedSecurity = createAdvancedSecurityMiddleware();
 
 /**
@@ -250,31 +251,31 @@ async function txHandler(
     } = processedBody;
 
     // ========================================
-    // STEP 1: Rate Limiting
+    // STEP 1: Rate Limiting - COMMENTED OUT
     // ========================================
-    if (!(await rateLimiter.checkWithSender(req, res, senderAddress))) {
-      return; // Rate limit exceeded, response already sent
-    }
+    // if (!(await rateLimiter.checkWithSender(req, res, senderAddress))) {
+    //   return; // Rate limit exceeded, response already sent
+    // }
 
     // Convert amount and fee to number if they're strings
     const parsedAmount = typeof amount === 'string' ? parseFloat(amount) : amount;
     const parsedTransactionFee = typeof transactionFee === 'string' ? parseFloat(transactionFee) : transactionFee;
 
     // ========================================
-    // STEP 2: Redis Blacklist Check
+    // STEP 2: Redis Blacklist Check - COMMENTED OUT
     // ========================================
-    const blacklistCheck = await validateRedisBlacklist(senderAddress, receiverAddress);
-    if (blacklistCheck.blocked) {
-      console.log(`[API] /api/tx - REDIS BLACKLIST BLOCK:`, {
-        address: blacklistCheck.address,
-        reason: blacklistCheck.reason
-      });
+    // const blacklistCheck = await validateRedisBlacklist(senderAddress, receiverAddress);
+    // if (blacklistCheck.blocked) {
+    //   console.log(`[API] /api/tx - REDIS BLACKLIST BLOCK:`, {
+    //     address: blacklistCheck.address,
+    //     reason: blacklistCheck.reason
+    //   });
 
-      return res.status(403).json(encryptionMiddleware.processResponse({
-        result: "error",
-        message: (`${blacklistCheck.reason}`)
-      }, req.headers));
-    }
+    //   return res.status(403).json(encryptionMiddleware.processResponse({
+    //     result: "error",
+    //     message: (`${blacklistCheck.reason}`)
+    //   }, req.headers));
+    // }
 
     // ========================================
     // STEP 3: Check if ATA needs to be created
@@ -328,16 +329,89 @@ async function txHandler(
     const receiverAccountInfo = await connection.getAccountInfo(receiverAta);
     if (!receiverAccountInfo) {
       ataCreationCount++;
-      receiverNeedsAta = true; // Flag for farming detection
-      console.log(`[API] /api/tx - Receiver ATA needs creation (relayer will pay)`);
+      receiverNeedsAta = true;
+      console.log(`[API] /api/tx - Receiver ATA needs creation (cost will be added to transaction fee)`);
     }
 
     if (feeReceiverAta && feeReceiver) {
       const feeReceiverAccountInfo = await connection.getAccountInfo(feeReceiverAta);
       if (!feeReceiverAccountInfo) {
         ataCreationCount++;
-        console.log(`[API] /api/tx - Fee receiver ATA needs creation (relayer will pay)`);
+        console.log(`[API] /api/tx - Fee receiver ATA needs creation (cost will be added to transaction fee)`);
       }
+    }
+
+    // Calculate ATA creation cost (rent exemption for token account = 2039280 lamports)
+    const ataRentExemption = 2039280; // lamports
+    totalAtaCreationCost = ataCreationCount * ataRentExemption;
+
+    // Check if this is a USDC transaction and verify sender has enough USDC balance
+    if (mint.equals(USDC_MINT)) {
+      console.log(`[API] /api/tx - Checking USDC balance for sender...`);
+      
+      const senderUsdcAta = await getAssociatedTokenAddress(USDC_MINT, sender);
+      const senderUsdcAccountInfo = await connection.getAccountInfo(senderUsdcAta);
+      
+      if (!senderUsdcAccountInfo) {
+        return res.status(400).json(encryptionMiddleware.processResponse({
+          result: "error",
+          message: "Sender does not have a USDC account. Please create one first."
+        }, req.headers));
+      }
+
+      // Get USDC balance
+      const senderUsdcBalance = await connection.getTokenAccountBalance(senderUsdcAta);
+      const requiredAmount = parsedAmount + (parsedTransactionFee || 0) + (totalAtaCreationCost / 1e6); // Convert lamports to USDC (6 decimals)
+      
+      console.log(`[API] /api/tx - Sender USDC balance: ${senderUsdcBalance.value.uiAmount} USDC`);
+      console.log(`[API] /api/tx - Required amount: ${requiredAmount} USDC (including ATA creation cost: ${totalAtaCreationCost / 1e6} USDC)`);
+      
+      if (senderUsdcBalance.value.uiAmount === null || senderUsdcBalance.value.uiAmount < requiredAmount) {
+        return res.status(400).json(encryptionMiddleware.processResponse({
+          result: "error",
+          message: `Insufficient USDC balance. Required: ${requiredAmount} USDC (including ATA creation cost), Available: ${senderUsdcBalance.value.uiAmount || 0} USDC`
+        }, req.headers));
+      }
+    }
+
+    // Calculate USDC equivalent of ATA creation cost for non-USDC transactions
+    let ataCreationCostInUsdc = 0;
+    if (!mint.equals(USDC_MINT) && totalAtaCreationCost > 0) {
+      // For non-USDC transactions, we need to get SOL price and convert to USDC
+      // For now, using a fixed conversion rate (this should be dynamic in production)
+      // 1 SOL ≈ 100 USDC (this is a placeholder - should use price oracle)
+      const solToUsdcRate = 100; // This should be fetched from a price oracle
+      const solAmount = totalAtaCreationCost / 1e9; // Convert lamports to SOL
+      ataCreationCostInUsdc = solAmount * solToUsdcRate;
+      
+      console.log(`[API] /api/tx - ATA creation cost: ${totalAtaCreationCost} lamports (${solAmount} SOL) ≈ ${ataCreationCostInUsdc} USDC`);
+    }
+
+    // Check USDC balance for all transactions (sender must have USDC for ATA creation costs)
+    console.log(`[API] /api/tx - Checking USDC balance for sender...`);
+    
+    const senderUsdcAta = await getAssociatedTokenAddress(USDC_MINT, sender);
+    const senderUsdcAccountInfo = await connection.getAccountInfo(senderUsdcAta);
+    
+    if (!senderUsdcAccountInfo) {
+      return res.status(400).json(encryptionMiddleware.processResponse({
+        result: "error",
+        message: "Sender does not have a USDC account. Please create one first."
+      }, req.headers));
+    }
+
+    // Get USDC balance
+    const senderUsdcBalance = await connection.getTokenAccountBalance(senderUsdcAta);
+    const requiredUsdcAmount = (parsedTransactionFee || 0) + ataCreationCostInUsdc;
+    
+    console.log(`[API] /api/tx - Sender USDC balance: ${senderUsdcBalance.value.uiAmount} USDC`);
+    console.log(`[API] /api/tx - Required USDC amount: ${requiredUsdcAmount} USDC (transaction fee: ${parsedTransactionFee || 0}, ATA creation cost: ${ataCreationCostInUsdc})`);
+    
+    if (senderUsdcBalance.value.uiAmount === null || senderUsdcBalance.value.uiAmount < requiredUsdcAmount) {
+      return res.status(400).json(encryptionMiddleware.processResponse({
+        result: "error",
+        message: `Insufficient USDC balance. Required: ${requiredUsdcAmount} USDC (transaction fee: ${parsedTransactionFee || 0}, ATA creation cost: ${ataCreationCostInUsdc}), Available: ${senderUsdcBalance.value.uiAmount || 0} USDC`
+      }, req.headers));
     }
 
     // ========================================
@@ -524,20 +598,7 @@ async function txHandler(
     if (!receiverAccountInfoCheck) {
       console.log(`[API] /api/tx - Receiver ATA does not exist, adding creation instruction`);
 
-      // COMMENTED OUT: Sender pays for ATA creation
-      // Relayer pays for ATA creation (original behavior)
-
-      // const ataRent = await connection.getMinimumBalanceForRentExemption(165);
-      // console.log(`[API] /api/tx - Adding SOL transfer for ATA creation: ${ataRent} lamports (${ataRent / 1e9} SOL)`);
-      // instructions.push(
-      //   SystemProgram.transfer({
-      //     fromPubkey: sender,
-      //     toPubkey: relayerWallet.publicKey,
-      //     lamports: ataRent,
-      //   })
-      // );
-
-      // Create receiver ATA (relayer pays)
+      // Create receiver ATA (relayer pays rent, sender pays via USDC transfer)
       instructions.push(
         createAssociatedTokenAccountInstruction(
           relayerWallet.publicKey,
@@ -546,6 +607,22 @@ async function txHandler(
           mint
         )
       );
+
+      // Add USDC transfer for ATA creation cost if needed
+      if (ataCreationCostInUsdc > 0) {
+        const senderUsdcAta = await getAssociatedTokenAddress(USDC_MINT, sender);
+        const relayerUsdcAta = await getAssociatedTokenAddress(USDC_MINT, relayerWallet.publicKey);
+        
+        console.log(`[API] /api/tx - Adding USDC transfer for ATA creation: ${ataCreationCostInUsdc} USDC`);
+        instructions.push(
+          createTransferInstruction(
+            senderUsdcAta,
+            relayerUsdcAta,
+            sender,
+            ataCreationCostInUsdc * 1e6 // Convert to USDC units (6 decimals)
+          )
+        );
+      }
     }
 
     if (feeReceiverAta && feeReceiver) {
@@ -554,20 +631,7 @@ async function txHandler(
       if (!feeReceiverAccountInfoCheck) {
         console.log(`[API] /api/tx - Fee receiver ATA does not exist, adding creation instruction`);
 
-        // COMMENTED OUT: Sender pays for ATA creation
-        // Relayer pays for ATA creation (original behavior)
-
-        // const ataRent = await connection.getMinimumBalanceForRentExemption(165);
-        // console.log(`[API] /api/tx - Adding SOL transfer for fee receiver ATA creation: ${ataRent} lamports (${ataRent / 1e9} SOL)`);
-        // instructions.push(
-        //   SystemProgram.transfer({
-        //     fromPubkey: sender,
-        //     toPubkey: relayerWallet.publicKey,
-        //     lamports: ataRent,
-        //   })
-        // );
-
-        // Create fee receiver ATA (relayer pays)
+        // Create fee receiver ATA (relayer pays rent, sender pays via USDC transfer)
         instructions.push(
           createAssociatedTokenAccountInstruction(
             relayerWallet.publicKey,
@@ -576,6 +640,22 @@ async function txHandler(
             mint
           )
         );
+
+        // Add USDC transfer for ATA creation cost if needed
+        if (ataCreationCostInUsdc > 0) {
+          const senderUsdcAta = await getAssociatedTokenAddress(USDC_MINT, sender);
+          const relayerUsdcAta = await getAssociatedTokenAddress(USDC_MINT, relayerWallet.publicKey);
+          
+          console.log(`[API] /api/tx - Adding USDC transfer for fee receiver ATA creation: ${ataCreationCostInUsdc} USDC`);
+          instructions.push(
+            createTransferInstruction(
+              senderUsdcAta,
+              relayerUsdcAta,
+              sender,
+              ataCreationCostInUsdc * 1e6 // Convert to USDC units (6 decimals)
+            )
+          );
+        }
       }
     }
 
@@ -653,6 +733,8 @@ async function txHandler(
         estimatedTotalCost: estimatedTotalCost,
         ataCreationCost: totalAtaCreationCost,
         ataCreationCount: ataCreationCount,
+        ataCreationCostInUsdc: ataCreationCostInUsdc,
+        senderPaysAtaCreation: true, // Indicates sender pays for ATA creation
       },
     };
 

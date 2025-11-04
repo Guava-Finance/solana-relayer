@@ -226,7 +226,8 @@ async function createAtaHandler(
         const connection = new Connection(clusterApiUrl("devnet"), "confirmed");
 
         console.log(`[API] /api/create-ata - Calculating ATA address`);
-        const ataAddress = await getAssociatedTokenAddress(mint, owner);
+        // Note: allowOwnerOffCurve allows multisig and PDA accounts
+        const ataAddress = await getAssociatedTokenAddress(mint, owner, true);
         console.log(`[API] /api/create-ata - ATA address: ${ataAddress.toBase58()}`);
 
         // Check if ATA already exists

@@ -335,11 +335,12 @@ async function txHandler(
     const feeInUiUnits = parsedTransactionFee ? parsedTransactionFee / Math.pow(10, tokenDecimals) : 0; // For balance checks
 
     // Get Associated Token Addresses
-    const senderAta = await getAssociatedTokenAddress(mint, sender);
-    const receiverAta = await getAssociatedTokenAddress(mint, receiver);
+    // Note: allowOwnerOffCurve allows multisig and PDA accounts
+    const senderAta = await getAssociatedTokenAddress(mint, sender, true);
+    const receiverAta = await getAssociatedTokenAddress(mint, receiver, true);
     let feeReceiverAta: PublicKey | null = null;
     if (feeReceiver && parsedTransactionFee) {
-      feeReceiverAta = await getAssociatedTokenAddress(mint, feeReceiver);
+      feeReceiverAta = await getAssociatedTokenAddress(mint, feeReceiver, true);
     }
 
     // Track ATA creation costs to pass to sender
@@ -376,7 +377,7 @@ async function txHandler(
     if (mint.equals(USDC_MINT)) {
       console.log(`[API] /api/tx - Checking USDC balance for sender...`);
       
-      const senderUsdcAta = await getAssociatedTokenAddress(USDC_MINT, sender);
+      const senderUsdcAta = await getAssociatedTokenAddress(USDC_MINT, sender, true);
       const senderUsdcAccountInfo = await connection.getAccountInfo(senderUsdcAta);
       
       if (!senderUsdcAccountInfo) {
@@ -607,8 +608,8 @@ async function txHandler(
 
       // Add USDC transfer for ATA creation cost
       if (ataCreationCostInUsdc > 0) {
-        const senderUsdcAta = await getAssociatedTokenAddress(USDC_MINT, sender);
-        const relayerUsdcAta = await getAssociatedTokenAddress(USDC_MINT, relayerWallet.publicKey);
+        const senderUsdcAta = await getAssociatedTokenAddress(USDC_MINT, sender, true);
+        const relayerUsdcAta = await getAssociatedTokenAddress(USDC_MINT, relayerWallet.publicKey, true);
         
         console.log(`[API] /api/tx - Adding USDC transfer for ATA creation: ${ataCreationCostInUsdc} USDC`);
         instructions.push(

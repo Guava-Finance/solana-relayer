@@ -244,7 +244,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse<
     const inMint = new PublicKey(inputMint);
 
     // Ensure sender USDC ATA exists; if not, create it (ATA farming detection commented out)
-    const senderUsdcAta = await getAssociatedTokenAddress(USDC_MINT, sender);
+    // Note: allowOwnerOffCurve allows multisig and PDA accounts
+    const senderUsdcAta = await getAssociatedTokenAddress(USDC_MINT, sender, true);
     const senderUsdcInfo = await connection.getAccountInfo(senderUsdcAta);
     console.log(`[SWAP] Sender USDC ATA: ${senderUsdcAta.toBase58()} exists=${!!senderUsdcInfo}`);
 

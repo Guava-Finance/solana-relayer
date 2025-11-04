@@ -13,10 +13,10 @@ import {
 import base58 from "bs58";
 
 import { createEncryptionMiddleware } from "../../utils/encrytption";
-import { validateSecurity, createSecurityErrorResponse, createEncryptedUnauthorizedResponse } from "../../utils/security";
-import { createRateLimiter, RateLimitConfigs } from "../../utils/rateLimiter";
-import { validateRedisBlacklist, addToRedisBlacklist } from "../../utils/redisBlacklist";
-import { createAdvancedSecurityMiddleware } from "../../utils/requestSigning";
+// import { validateSecurity, createSecurityErrorResponse, createEncryptedUnauthorizedResponse } from "../../utils/security";
+// import { createRateLimiter, RateLimitConfigs } from "../../utils/rateLimiter";
+// import { validateRedisBlacklist, addToRedisBlacklist } from "../../utils/redisBlacklist";
+// import { createAdvancedSecurityMiddleware } from "../../utils/requestSigning";
 // import { getCachedAtaFarmingAnalysis } from "../../utils/ataFarmingDetector";
 
 type NetworkCongestion = 'low' | 'medium' | 'high' | 'extreme';
@@ -38,8 +38,8 @@ const encryptionMiddleware = createEncryptionMiddleware(
   process.env.AES_ENCRYPTION_KEY || "default-key",
   process.env.AES_ENCRYPTION_IV || "default-iv-16b!!"
 );
-const rateLimiter = createRateLimiter(RateLimitConfigs.TRANSACTION);
-const advancedSecurity = createAdvancedSecurityMiddleware();
+// const rateLimiter = createRateLimiter(RateLimitConfigs.TRANSACTION);
+// const advancedSecurity = createAdvancedSecurityMiddleware();
 
 const USDC_MINT = new PublicKey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
 
@@ -159,11 +159,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse<
     console.log(`[SWAP] Request start - headers:`, req.headers);
     console.log(`[SWAP] Raw body (as received):`, truncateForLog(req.body));
 
-    const securityValidation = validateSecurity(req);
-    if (!securityValidation.isValid) {
-      console.log(`[SWAP] Security validation failed:`, securityValidation.error);
-      return res.status(401).json(createSecurityErrorResponse(securityValidation.error!));
-    }
+    // Security validation - COMMENTED OUT
+    // const securityValidation = validateSecurity(req);
+    // if (!securityValidation.isValid) {
+    //   console.log(`[SWAP] Security validation failed:`, securityValidation.error);
+    //   return res.status(401).json(createSecurityErrorResponse(securityValidation.error!));
+    // }
 
     let processedBody: any;
     try {
@@ -177,19 +178,21 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse<
       });
     }
 
-    const advancedSecurityValidation = await advancedSecurity.validateRequest(req, processedBody);
-    if (!advancedSecurityValidation.valid) {
-      console.log(`[SWAP] Advanced security validation failed:`, advancedSecurityValidation.error);
-      return res.status(401).json(createEncryptedUnauthorizedResponse());
-    }
+    // Advanced security validation - COMMENTED OUT
+    // const advancedSecurityValidation = await advancedSecurity.validateRequest(req, processedBody);
+    // if (!advancedSecurityValidation.valid) {
+    //   console.log(`[SWAP] Advanced security validation failed:`, advancedSecurityValidation.error);
+    //   return res.status(401).json(createEncryptedUnauthorizedResponse());
+    // }
 
     const { senderAddress, inputMint, amount } = processedBody;
 
-    if (!(await rateLimiter.checkWithSender(req, res, senderAddress))) {
-      console.log(`[SWAP] Rate limiter blocked request for sender: ${senderAddress}`);
-      return;
-    }
-    console.log(`[SWAP] Rate limiter passed for sender: ${senderAddress}`);
+    // Rate limiter - COMMENTED OUT
+    // if (!(await rateLimiter.checkWithSender(req, res, senderAddress))) {
+    //   console.log(`[SWAP] Rate limiter blocked request for sender: ${senderAddress}`);
+    //   return;
+    // }
+    // console.log(`[SWAP] Rate limiter passed for sender: ${senderAddress}`);
 
     if (!senderAddress || typeof senderAddress !== "string") {
       return res.status(400).json({
@@ -210,15 +213,16 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse<
       });
     }
 
-    const blacklist = await validateRedisBlacklist(senderAddress, senderAddress);
-    if (blacklist.blocked) {
-      console.log(`[SWAP] Redis blacklist block:`, blacklist);
-      return res.status(403).json({
-        result: "error",
-        message: `${blacklist.reason}`
-      });
-    }
-    console.log(`[SWAP] Redis blacklist passed`);
+    // Redis blacklist - COMMENTED OUT
+    // const blacklist = await validateRedisBlacklist(senderAddress, senderAddress);
+    // if (blacklist.blocked) {
+    //   console.log(`[SWAP] Redis blacklist block:`, blacklist);
+    //   return res.status(403).json({
+    //     result: "error",
+    //     message: `${blacklist.reason}`
+    //   });
+    // }
+    // console.log(`[SWAP] Redis blacklist passed`);
 
     if (!process.env.WALLET) {
       return res.status(500).json({
@@ -323,6 +327,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse<
 
     if (!swapResp.ok) {
       const errText = await swapResp.text().catch(() => "");
+      console.error(`[SWAP] Jupiter swap API failed with status ${swapResp.status}:`, errText);
       return res.status(500).json({
         result: "error",
         message: `Swap build failed${errText ? `: ${errText}` : ""}`

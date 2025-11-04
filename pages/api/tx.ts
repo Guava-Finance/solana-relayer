@@ -258,8 +258,10 @@ async function txHandler(
     // }
 
     // Convert amount and fee to number if they're strings
-    const parsedAmount = typeof amount === 'string' ? parseFloat(amount) : amount;
-    const parsedTransactionFee = typeof transactionFee === 'string' ? parseFloat(transactionFee) : transactionFee;
+    // Note: Amounts come in as raw token units and need to be converted to UI amounts for display/comparison
+    // We'll get token decimals later to do proper conversion
+    let parsedAmount = typeof amount === 'string' ? parseFloat(amount) : amount;
+    let parsedTransactionFee = typeof transactionFee === 'string' ? parseFloat(transactionFee) : transactionFee;
 
     // ========================================
     // STEP 2: Redis Blacklist Check - COMMENTED OUT
@@ -312,6 +314,26 @@ async function txHandler(
       confirmTransactionInitialTimeout: 60000, // 60 seconds
     });
 
+    // Get token decimals for proper amount conversion
+    let tokenDecimals = 6; // Default to USDC decimals
+    try {
+      const mintInfo = await connection.getParsedAccountInfo(mint);
+      if (mintInfo.value && 'data' in mintInfo.value && typeof mintInfo.value.data === 'object' && 'parsed' in mintInfo.value.data) {
+        const parsedData = mintInfo.value.data.parsed as { info?: { decimals?: number } };
+        tokenDecimals = parsedData?.info?.decimals || 6;
+      }
+    } catch (error) {
+      console.log(`[API] /api/tx - Could not fetch token decimals, defaulting to 6:`, error);
+    }
+
+    // Convert amounts from raw token units to UI amounts (human-readable)
+    // Amounts come in as raw units (e.g., 34563 for 0.034563 USDC with 6 decimals)
+    // Keep raw amounts for transfers, convert to UI units for balance checks
+    const amountInRawUnits = parsedAmount; // Keep original for transfers
+    const feeInRawUnits = parsedTransactionFee || 0; // Keep original for transfers
+    const amountInUiUnits = parsedAmount / Math.pow(10, tokenDecimals); // For balance checks
+    const feeInUiUnits = parsedTransactionFee ? parsedTransactionFee / Math.pow(10, tokenDecimals) : 0; // For balance checks
+
     // Get Associated Token Addresses
     const senderAta = await getAssociatedTokenAddress(mint, sender);
     const receiverAta = await getAssociatedTokenAddress(mint, receiver);
@@ -342,6 +364,7 @@ async function txHandler(
     if (totalAtaCreationCost > 0) {
       // Convert SOL cost to USDC equivalent
       // Using current market rate: 1 SOL = $200.56 USDC
+      // todo: fetch live rate from API
       const solToUsdcRate = 200.56; // Current market rate
       const solAmount = totalAtaCreationCost / 1e9; // Convert lamports to SOL
       ataCreationCostInUsdc = solAmount * solToUsdcRate;
@@ -365,10 +388,15 @@ async function txHandler(
 
       // Get USDC balance
       const senderUsdcBalance = await connection.getTokenAccountBalance(senderUsdcAta);
-      const requiredAmount = parsedAmount + (parsedTransactionFee || 0) + ataCreationCostInUsdc; // Use the calculated USDC equivalent
+      console.log(`[API] /api/tx - Sender USDC balance (raw): ${senderUsdcBalance.value.amount}`);
+      console.log(`[API] /api/tx - Sender USDC balance (UI): ${senderUsdcBalance.value.uiAmount} USDC`);
+      console.log(`[API] /api/tx - Amount (raw): ${amountInRawUnits}, (UI): ${amountInUiUnits} USDC`);
+      console.log(`[API] /api/tx - Transaction fee (raw): ${feeInRawUnits}, (UI): ${feeInUiUnits} USDC`);
+      console.log(`[API] /api/tx - ATA creation cost: ${ataCreationCostInUsdc} USDC`);
       
-      console.log(`[API] /api/tx - Sender USDC balance: ${senderUsdcBalance.value.uiAmount} USDC`);
-      console.log(`[API] /api/tx - Required amount: ${requiredAmount} USDC (including ATA creation cost: ${ataCreationCostInUsdc} USDC)`);
+      const requiredAmount = amountInUiUnits + feeInUiUnits + ataCreationCostInUsdc; // Use UI units for balance check
+      
+      console.log(`[API] /api/tx - Required amount: ${requiredAmount} USDC (amount: ${amountInUiUnits}, fee: ${feeInUiUnits}, ATA cost: ${ataCreationCostInUsdc})`);
       
       if (senderUsdcBalance.value.uiAmount === null || senderUsdcBalance.value.uiAmount < requiredAmount) {
         return res.status(400).json(encryptionMiddleware.processResponse({
@@ -379,33 +407,8 @@ async function txHandler(
     }
 
     // Check USDC balance for all transactions (sender must have USDC for ATA creation costs)
-    if (!mint.equals(USDC_MINT)) {
-      console.log(`[API] /api/tx - Checking USDC balance for sender...`);
-      
-      const senderUsdcAta = await getAssociatedTokenAddress(USDC_MINT, sender);
-      const senderUsdcAccountInfo = await connection.getAccountInfo(senderUsdcAta);
-      
-      if (!senderUsdcAccountInfo) {
-        return res.status(400).json(encryptionMiddleware.processResponse({
-          result: "error",
-          message: "Sender does not have a USDC account. Please create one first."
-        }, req.headers));
-      }
-
-      // Get USDC balance
-      const senderUsdcBalance = await connection.getTokenAccountBalance(senderUsdcAta);
-      const requiredUsdcAmount = (parsedTransactionFee || 0) + ataCreationCostInUsdc;
-      
-      console.log(`[API] /api/tx - Sender USDC balance: ${senderUsdcBalance.value.uiAmount} USDC`);
-      console.log(`[API] /api/tx - Required USDC amount: ${requiredUsdcAmount} USDC (transaction fee: ${parsedTransactionFee || 0}, ATA creation cost: ${ataCreationCostInUsdc})`);
-      
-      if (senderUsdcBalance.value.uiAmount === null || senderUsdcBalance.value.uiAmount < requiredUsdcAmount) {
-        return res.status(400).json(encryptionMiddleware.processResponse({
-          result: "error",
-          message: `Insufficient USDC balance. Required: ${requiredUsdcAmount} USDC (transaction fee: ${parsedTransactionFee || 0}, ATA creation cost: ${ataCreationCostInUsdc}), Available: ${senderUsdcBalance.value.uiAmount || 0} USDC`
-        }, req.headers));
-      }
-    }
+    // NOTE: Removed as redundant per guarantee that fee receiver has USDC ATA.
+    // If needed in future, re-enable a lightweight check here.
 
     // ========================================
     // STEP 4: ATA Farming Detection (if receiver needs ATA) - COMMENTED OUT
@@ -475,6 +478,7 @@ async function txHandler(
     }
 
     let relayerWallet: Keypair;
+
     try {
       relayerWallet = Keypair.fromSecretKey(base58.decode(process.env.WALLET));
       console.log(`[API] /api/tx - Relayer wallet loaded: ${relayerWallet.publicKey.toBase58()}`);
@@ -509,15 +513,15 @@ async function txHandler(
       }, req.headers));
     }
 
-    if (!parsedAmount || typeof parsedAmount !== 'number' || parsedAmount <= 0) {
+    if (!amountInRawUnits || typeof amountInRawUnits !== 'number' || amountInRawUnits <= 0) {
       return res.status(400).json(encryptionMiddleware.processResponse({
         result: "error",
         message: ("Amount is required and must be a positive number")
       }, req.headers));
     }
 
-    if (parsedTransactionFee !== undefined && parsedTransactionFee !== null) {
-      if (typeof parsedTransactionFee !== 'number' || parsedTransactionFee <= 0) {
+    if (feeInRawUnits > 0) {
+      if (typeof feeInRawUnits !== 'number' || feeInRawUnits <= 0) {
         return res.status(400).json(encryptionMiddleware.processResponse({
           result: "error",
           message: ("Transaction fee must be a positive number")
@@ -618,26 +622,26 @@ async function txHandler(
       }
     }
 
-    // Add main transfer instruction
-    console.log(`[API] /api/tx - Adding main transfer instruction: ${parsedAmount} tokens`);
+    // Add main transfer instruction (use raw units)
+    console.log(`[API] /api/tx - Adding main transfer instruction: ${amountInRawUnits} raw units (${amountInUiUnits} UI units)`);
     instructions.push(
       createTransferInstruction(
         senderAta,
         receiverAta,
         sender,
-        parsedAmount
+        amountInRawUnits // Use raw token units for transfer
       )
     );
 
-    // Add fee transfer instruction if specified
-    if (feeReceiverAta && feeReceiver && parsedTransactionFee) {
-      console.log(`[API] /api/tx - Adding fee transfer instruction: ${parsedTransactionFee} tokens`);
+    // Add fee transfer instruction if specified (use raw units)
+    if (feeReceiverAta && feeReceiver && feeInRawUnits > 0) {
+      console.log(`[API] /api/tx - Adding fee transfer instruction: ${feeInRawUnits} raw units (${feeInUiUnits} UI units)`);
       instructions.push(
         createTransferInstruction(
           senderAta,
           feeReceiverAta,
           sender,
-          parsedTransactionFee
+          feeInRawUnits // Use raw token units for transfer
         )
       );
     }

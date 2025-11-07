@@ -361,16 +361,13 @@ async function txHandler(
     totalAtaCreationCost = ataCreationCount * ataRentExemption;
 
     // Calculate USDC equivalent of ATA creation cost
+    // Fixed cost per ATA creation: 0.32 USDC
     let ataCreationCostInUsdc = 0;
     if (totalAtaCreationCost > 0) {
-      // Convert SOL cost to USDC equivalent
-      // Using current market rate: 1 SOL = $200.56 USDC
-      // todo: fetch live rate from API
-      const solToUsdcRate = 200.56; // Current market rate
       const solAmount = totalAtaCreationCost / 1e9; // Convert lamports to SOL
-      ataCreationCostInUsdc = solAmount * solToUsdcRate;
+      ataCreationCostInUsdc = ataCreationCount * 0.32; // Fixed cost: 0.32 USDC per ATA
       
-      console.log(`[API] /api/tx - ATA creation cost: ${totalAtaCreationCost} lamports (${solAmount} SOL) ≈ ${ataCreationCostInUsdc} USDC`);
+      console.log(`[API] /api/tx - ATA creation cost: ${totalAtaCreationCost} lamports (${solAmount} SOL) → Fixed charge: ${ataCreationCostInUsdc} USDC (${ataCreationCount} ATA × 0.32 USDC)`);
     }
 
     // Check if this is a USDC transaction and verify sender has enough USDC balance

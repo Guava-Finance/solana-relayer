@@ -2,6 +2,7 @@
 // Spec: https://docs.solanapay.com/spec#specification-transaction-request
 import type { NextApiRequest, NextApiResponse } from "next";
 import { PublicKey } from "@solana/web3.js";
+import base58 from "bs58";
 
 const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const GUAVA_LOGO_URL = "https://guava.finance/assets/logo.svg";
@@ -187,14 +188,30 @@ async function handlePostRequest(
       priorityFee: relayerData.message?.priorityFee,
     });
 
-    // Extract the transaction from the relayer response
-    const transaction = relayerData.message?.tx;
+    // Extract the transaction from the relayer response (in base58 format)
+    const transactionBase58 = relayerData.message?.tx;
 
-    if (!transaction) {
+    if (!transactionBase58) {
       console.error(`[SOLANA-PAY] No transaction in relayer response`);
       return res.status(500).json({
         error: "Transaction creation failed",
         message: "Relayer did not return a valid transaction",
+      });
+    }
+
+    // Convert transaction from base58 (relayer format) to base64 (Solana Pay format)
+    let transactionBase64: string;
+    try {
+      const transactionBytes = base58.decode(transactionBase58);
+      transactionBase64 = Buffer.from(transactionBytes).toString('base64');
+      console.log(`[SOLANA-PAY] Converted transaction from base58 to base64`);
+      console.log(`[SOLANA-PAY] - Base58 length: ${transactionBase58.length} chars`);
+      console.log(`[SOLANA-PAY] - Base64 length: ${transactionBase64.length} chars`);
+    } catch (error) {
+      console.error(`[SOLANA-PAY] Failed to convert transaction format:`, error);
+      return res.status(500).json({
+        error: "Transaction encoding failed",
+        message: "Failed to convert transaction to base64 format",
       });
     }
 
@@ -205,9 +222,9 @@ async function handlePostRequest(
     console.log(`[SOLANA-PAY] Transaction created successfully`);
     console.log(`[SOLANA-PAY] Message: ${paymentMessage}`);
 
-    // Return Solana Pay response
+    // Return Solana Pay response with base64-encoded transaction
     return res.status(200).json({
-      transaction: transaction,
+      transaction: transactionBase64,
       message: paymentMessage,
     });
 

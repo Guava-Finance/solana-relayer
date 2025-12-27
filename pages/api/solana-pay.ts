@@ -5,8 +5,8 @@ import { PublicKey } from "@solana/web3.js";
 import base58 from "bs58";
 
 const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
-const GUAVA_LOGO_URL = "https://guava.finance/assets/logo.svg";
-const GUAVA_ICON_URL = "https://guava.finance/assets/logo.svg"; // Can be a smaller icon if you have one
+const GUAVA_LOGO_URL = "https://res.cloudinary.com/oghenekparobor/image/upload/v1766849906/Group_14161_xuqla5.png";
+const GUAVA_ICON_URL = "https://res.cloudinary.com/oghenekparobor/image/upload/v1766849906/Group_14161_xuqla5.png";
 
 // GET response - returns label and icon
 type SolanaPayGetResponse = {

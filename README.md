@@ -5,6 +5,7 @@ A Next.js-based relayer service for Solana blockchain operations with optional e
 ## Features
 
 - **Gas Fee Relaying**: Relayer pays for all transaction fees (SOL)
+- **Solana Pay Integration**: Transaction Request endpoint for gasless payments ⚡
 - **Associated Token Account (ATA) Creation**: Automatic creation of token accounts
 - **Token Transfers**: SPL token transfers with optional transaction fees
 - **Memo Support**: Add transaction narrations/memos
@@ -59,6 +60,83 @@ yarn dev
 The server will be available at [http://localhost:3000](http://localhost:3000).
 
 ## API Endpoints
+
+### 🆕 Solana Pay Transaction Request (Gasless Payments)
+
+**Endpoint:** `GET /api/solana-pay`
+
+**NEW!** This endpoint enables gasless USDC payments following the Solana Pay specification. Customers can pay without holding SOL for transaction fees - Guava sponsors all fees!
+
+#### Query Parameters
+
+```typescript
+{
+  account: string;      // Customer's wallet address (auto-provided by wallet)
+  recipient: string;    // Merchant's wallet address (required)
+  amount: string;       // Payment amount in USDC, e.g., "1.5" (required)
+  label?: string;       // Payment description (optional)
+  reference?: string;   // Transaction reference for tracking (optional)
+}
+```
+
+#### Example Request
+
+```bash
+GET https://relayer.guava.finance/api/solana-pay?
+    account=CUSTOMER_WALLET&
+    recipient=MERCHANT_WALLET&
+    amount=10.5&
+    label=Sababa%20Cafe
+```
+
+#### Response
+
+**Success (200):**
+```json
+{
+  "transaction": "base64_encoded_partially_signed_transaction",
+  "message": "Sababa Cafe - 10.5 USDC (Gasless)"
+}
+```
+
+**Error (400/500):**
+```json
+{
+  "error": "Error type",
+  "message": "Detailed error message"
+}
+```
+
+#### Integration Examples
+
+**Flutter (Generate Transaction Request URL):**
+```dart
+final uri = Uri.https(
+  'relayer.guava.finance',
+  '/api/solana-pay',
+  {
+    'recipient': merchantWallet,
+    'amount': amount.toString(),
+    'label': 'Sababa Cafe',
+  },
+);
+// Generate QR code or NFC tag with this URL
+```
+
+**Test with cURL:**
+```bash
+./test-solana-pay.sh production
+```
+
+**Compatible Wallets:**
+- ✅ Phantom
+- ✅ Solflare  
+- ✅ Backpack
+- ✅ Any wallet supporting Solana Pay Transaction Requests
+
+📚 **Full Documentation:** See [SOLANA_PAY_INTEGRATION.md](./SOLANA_PAY_INTEGRATION.md) and [GASLESS_PAYMENTS_SUMMARY.md](./GASLESS_PAYMENTS_SUMMARY.md)
+
+---
 
 ### 1. Create Associated Token Account (ATA)
 

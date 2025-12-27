@@ -7,10 +7,19 @@ const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const GUAVA_LOGO_URL = "https://guava.finance/assets/logo.svg";
 const GUAVA_ICON_URL = "https://guava.finance/assets/logo.svg"; // Can be a smaller icon if you have one
 
-type SolanaPayResponse = {
+// GET response - returns label and icon
+type SolanaPayGetResponse = {
+  label: string;
+  icon: string;
+};
+
+// POST response - returns transaction
+type SolanaPayPostResponse = {
   transaction: string;
   message?: string;
 };
+
+type SolanaPayResponse = SolanaPayGetResponse | SolanaPayPostResponse;
 
 type SolanaPayError = {
   error: string;
@@ -34,24 +43,48 @@ type SolanaPayError = {
  * - transaction: Base64 encoded partially-signed transaction
  * - message: Human-readable payment description
  */
+// File: solana-relayer/pages/api/solana-pay.ts
+
 export default async function handler(
   req: NextApiRequest,
   res: NextApiResponse<SolanaPayResponse | SolanaPayError>
 ) {
   console.log(`[SOLANA-PAY] Request received - Method: ${req.method}`);
   console.log(`[SOLANA-PAY] Query params:`, req.query);
+  console.log(`[SOLANA-PAY] Body:`, req.body);
 
-  // Only allow GET requests (per Solana Pay spec)
-  if (req.method !== "GET") {
-    return res.status(405).json({
-      error: "Method not allowed",
-      message: "Only GET requests are supported for Solana Pay Transaction Requests",
+  // Handle GET request - return label and icon
+  if (req.method === "GET") {
+    const label = typeof req.query.label === "string" ? req.query.label : "Guava Payment";
+    const icon = GUAVA_ICON_URL;
+
+    return res.status(200).json({
+      label,
+      icon,
     });
   }
 
+  // Handle POST request - create transaction
+  if (req.method === "POST") {
+    return handlePostRequest(req, res);
+  }
+
+  return res.status(405).json({
+    error: "Method not allowed",
+    message: "Only GET and POST requests are supported",
+  });
+}
+
+async function handlePostRequest(
+  req: NextApiRequest,
+  res: NextApiResponse<SolanaPayResponse | SolanaPayError>
+) {
   try {
-    // Extract and validate query parameters
-    const { account, recipient, amount, reference, label } = req.query;
+    // Extract parameters
+    // account comes from POST body (sent by wallet)
+    // recipient, amount, label, reference come from query params (from QR code URL)
+    const { account } = req.body;
+    const { recipient, amount, reference, label } = req.query;
 
     // Validate required parameters
     if (!account || typeof account !== "string") {
@@ -106,12 +139,12 @@ export default async function handler(
       });
     }
 
-    // Convert amount from USDC (6 decimals) to raw units (lamports equivalent for USDC)
-    const amountInRawUnits = Math.floor(parsedAmount * 1_000_000); // USDC has 6 decimals
+    // Convert amount from USDC (6 decimals) to raw units
+    const amountInRawUnits = Math.floor(parsedAmount * 1_000_000);
 
     console.log(`[SOLANA-PAY] Payment request:`);
-    console.log(`[SOLANA-PAY] - Customer: ${account}`);
-    console.log(`[SOLANA-PAY] - Merchant: ${recipient}`);
+    console.log(`[SOLANA-PAY] - Customer: ${account} (from POST body)`);
+    console.log(`[SOLANA-PAY] - Merchant: ${recipient} (from query params)`);
     console.log(`[SOLANA-PAY] - Amount: ${parsedAmount} USDC (${amountInRawUnits} raw units)`);
     console.log(`[SOLANA-PAY] - Label: ${label || "Guava Payment"}`);
     console.log(`[SOLANA-PAY] - Reference: ${reference || "N/A"}`);
@@ -122,14 +155,12 @@ export default async function handler(
       receiverAddress: recipient,
       tokenMint: USDC_MINT,
       amount: amountInRawUnits.toString(),
-      narration: label || "Powered by Guava",
+      narration: typeof label === "string" ? label : "Powered by Guava",
     };
 
     console.log(`[SOLANA-PAY] Calling relayer with payload:`, relayerPayload);
 
     // Call the internal /api/tx endpoint
-    // Note: In production, you might want to make this a direct function call
-    // instead of an HTTP request to avoid the overhead
     const relayerUrl = process.env.RELAYER_URL || "https://relayer.guava.finance";
     const response = await fetch(`${relayerUrl}/api/tx`, {
       method: "POST",
@@ -196,4 +227,3 @@ export default async function handler(
     });
   }
 }
-

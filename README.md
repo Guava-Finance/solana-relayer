@@ -48,6 +48,10 @@ WALLET=your_base58_encoded_wallet_secret_key
 # Optional: Encryption settings
 AES_ENCRYPTION_KEY=your-super-secret-encryption-key-here
 AES_ENCRYPTION_IV=exact-16-bytes!! # Must be exactly 16 characters
+
+# Optional: PAJ On-Ramp API Key
+PAJ_BUSINESS_API_KEY=your_paj_business_api_key
+PAJ_ENVIRONMENT=production # or "staging" (default: "production")
 ```
 
 5. Run the development server:
@@ -135,6 +139,178 @@ final uri = Uri.https(
 - ✅ Any wallet supporting Solana Pay Transaction Requests
 
 📚 **Full Documentation:** See [SOLANA_PAY_INTEGRATION.md](./SOLANA_PAY_INTEGRATION.md) and [GASLESS_PAYMENTS_SUMMARY.md](./GASLESS_PAYMENTS_SUMMARY.md)
+
+---
+
+### 🆕 On-Ramp Endpoints (PAJ Integration)
+
+The service includes on-ramp functionality powered by [paj_ramp](https://www.npmjs.com/package/paj_ramp) for converting fiat currency to cryptocurrency.
+
+#### 1. Initiate Session
+
+**Endpoint:** `POST /api/onramp/initiate`
+
+Initiates a new on-ramp session for a user.
+
+**Request:**
+```typescript
+{
+  email: string;  // User's email address (required)
+}
+```
+
+**Response:**
+```typescript
+{
+  result: "success",
+  message: {
+    email: string;
+  }
+}
+```
+
+#### 2. Verify Session
+
+**Endpoint:** `POST /api/onramp/verify`
+
+Verifies a session using OTP and device signature.
+
+**Request:**
+```typescript
+{
+  email: string;           // User's email address (required)
+  otp: string;             // One-time password (required)
+  deviceSignature: string; // Device signature (required)
+}
+```
+
+**Response:**
+```typescript
+{
+  result: "success",
+  message: {
+    email: string;
+    isActive: boolean;
+    expiresAt: string;
+    token: string;
+  }
+}
+```
+
+#### 3. Get All Rates
+
+**Endpoint:** `GET /api/onramp/rates` or `POST /api/onramp/rates`
+
+Retrieves the current exchange rates.
+
+**Response:**
+```typescript
+{
+  result: "success",
+  message: {
+    baseCurrency: string;
+    targetCurrency: string;
+    rate: number;
+  }
+}
+```
+
+#### 4. Get Rate by Amount
+
+**Endpoint:** `GET /api/onramp/rates/amount?amount=50000` or `POST /api/onramp/rates/amount`
+
+Retrieves exchange rate and calculated amounts for a specific amount.
+
+**Query Parameters (GET):**
+- `amount`: number (required) - Amount to calculate rate for
+
+**Request Body (POST):**
+```typescript
+{
+  amount: number;  // Amount to calculate rate for (required)
+}
+```
+
+**Response:**
+```typescript
+{
+  result: "success",
+  message: {
+    rate: {
+      baseCurrency: string;
+      targetCurrency: string;
+      rate: number;
+    };
+    amounts: {
+      userTax: number;
+      merchantTax: number;
+      amountUSD: number;
+      userAmountFiat: number;
+    };
+  }
+}
+```
+
+#### 5. Get Rate by Rate Type
+
+**Endpoint:** `GET /api/onramp/rates/type?rateType=standard` or `POST /api/onramp/rates/type`
+
+Retrieves exchange rate for a specific rate type.
+
+**Query Parameters (GET):**
+- `rateType`: string (required) - Type of rate to retrieve
+
+**Request Body (POST):**
+```typescript
+{
+  rateType: string;  // Rate type (required)
+}
+```
+
+**Response:**
+```typescript
+{
+  result: "success",
+  message: {
+    baseCurrency: string;
+    targetCurrency: string;
+    rate: number;
+    rateType: string;
+  }
+}
+```
+
+#### 6. Create On-Ramp Order
+
+**Endpoint:** `POST /api/onramp/order`
+
+Creates a new on-ramp order.
+
+**Request:**
+```typescript
+{
+  email: string;          // User's email address (required)
+  amount: number;         // Order amount (required)
+  currency?: string;      // Currency code (default: "NGN")
+  paymentMethod?: string; // Payment method (default: "card")
+  walletAddress?: string; // Destination wallet address
+  // ... other order parameters
+}
+```
+
+**Response:**
+```typescript
+{
+  result: "success",
+  message: {
+    orderId: string;
+    status: string;
+    // ... other order details
+  }
+}
+```
+
+**Note:** All on-ramp endpoints support optional encryption via the `IS_ENCRYPTED: YES` header, consistent with other API endpoints.
 
 ---
 
@@ -469,6 +645,7 @@ Ensure environment variables are properly set:
 - `WALLET`: Base58 encoded relayer wallet secret key
 - `AES_ENCRYPTION_KEY`: Encryption key (if using encryption)
 - `AES_ENCRYPTION_IV`: 16-byte encryption IV (if using encryption)
+- `PAJ_BUSINESS_API_KEY`: PAJ on-ramp business API key (if using on-ramp endpoints)
 
 ## Support
 

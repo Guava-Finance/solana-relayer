@@ -178,6 +178,8 @@ const Home: NextPage = () => {
               // }}
               src="/phantom.svg"
               alt="phantom"
+              width={20}
+              height={20}
             />
           }
         >

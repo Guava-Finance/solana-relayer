@@ -24,6 +24,7 @@
     "next": "15.5.9",
     "react": "18.2.0",
     "react-dom": "18.2.0",
+    "paj_ramp": "^1.0.0",
     "react-hot-toast": "^2.4.0",
     "redis": "^5.8.2",
     "tweetnacl": "^1.0.3",

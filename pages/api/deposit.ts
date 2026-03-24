@@ -7,6 +7,14 @@ import {
   ComputeBudgetProgram,
   clusterApiUrl,
 } from "@solana/web3.js";
+import {
+  getAssociatedTokenAddress,
+  createTransferInstruction,
+  createAssociatedTokenAccountIdempotentInstruction,
+  getAccount,
+  TokenAccountNotFoundError,
+  TokenInvalidAccountOwnerError,
+} from "@solana/spl-token";
 import base58 from "bs58";
 import type { NextApiRequest, NextApiResponse } from "next";
 import { createEncryptionMiddleware } from "../../utils/encrytption";
@@ -46,6 +54,9 @@ interface Step {
 
 interface DepositRequest {
   steps: Step[];
+  sender_wallet_address: string;
+  transaction_fee?: number;
+  transaction_fee_address?: string;
 }
 
 interface DepositResponse {
@@ -120,6 +131,43 @@ async function depositHandler(
         result: "error",
         message: "steps is required and must be a non-empty array",
       }, req.headers));
+    }
+
+    if (!body.sender_wallet_address) {
+      return res.status(400).json(encryptionMiddleware.processResponse({
+        result: "error",
+        message: "sender_wallet_address is required",
+      }, req.headers));
+    }
+
+    let senderPubkey: PublicKey;
+    try {
+      senderPubkey = new PublicKey(body.sender_wallet_address);
+    } catch {
+      return res.status(400).json(encryptionMiddleware.processResponse({
+        result: "error",
+        message: "sender_wallet_address is not a valid Solana public key",
+      }, req.headers));
+    }
+
+    const transactionFee = body.transaction_fee ?? 0;
+
+    let feeDestPubkey: PublicKey | null = null;
+    if (transactionFee > 0) {
+      if (!body.transaction_fee_address) {
+        return res.status(400).json(encryptionMiddleware.processResponse({
+          result: "error",
+          message: "transaction_fee_address is required when transaction_fee > 0",
+        }, req.headers));
+      }
+      try {
+        feeDestPubkey = new PublicKey(body.transaction_fee_address);
+      } catch {
+        return res.status(400).json(encryptionMiddleware.processResponse({
+          result: "error",
+          message: "transaction_fee_address is not a valid Solana public key",
+        }, req.headers));
+      }
     }
 
     if (!process.env.WALLET) {
@@ -205,6 +253,55 @@ async function depositHandler(
       }, req.headers));
     }
 
+    const USDC_MINT = new PublicKey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+    let ataCreationCost = 0;
+    let ataCreationCount = 0;
+
+    if (transactionFee > 0 && feeDestPubkey !== null) {
+      const senderAta = await getAssociatedTokenAddress(USDC_MINT, senderPubkey);
+      const feeDestAta = await getAssociatedTokenAddress(USDC_MINT, feeDestPubkey);
+
+      // Check if the destination ATA exists; if not, prepend a create instruction
+      let feeDestAtaExists = false;
+      try {
+        await getAccount(connection, feeDestAta);
+        feeDestAtaExists = true;
+      } catch (err) {
+        if (
+          err instanceof TokenAccountNotFoundError ||
+          err instanceof TokenInvalidAccountOwnerError
+        ) {
+          feeDestAtaExists = false;
+        } else {
+          throw err;
+        }
+      }
+
+      if (!feeDestAtaExists) {
+        const createAtaIx = createAssociatedTokenAccountIdempotentInstruction(
+          relayerWallet.publicKey, // payer (relayer pays ATA creation)
+          feeDestAta,
+          feeDestPubkey,
+          USDC_MINT
+        );
+        instructions.push(createAtaIx);
+        // ATA creation costs ~0.00203928 SOL (2039280 lamports)
+        const ataCostLamports = 2_039_280;
+        ataCreationCost += ataCostLamports;
+        ataCreationCount += 1;
+        console.log(`[API] /api/deposit - Fee destination ATA does not exist, adding creation instruction`);
+      }
+
+      const feeTransferIx = createTransferInstruction(
+        senderAta,
+        feeDestAta,
+        senderPubkey,
+        transactionFee
+      );
+      instructions.push(feeTransferIx);
+      console.log(`[API] /api/deposit - Appended USDC fee transfer: ${transactionFee} units from ${senderPubkey.toBase58()} to ${feeDestPubkey.toBase58()}`);
+    }
+
     const transaction = new Transaction().add(...instructions);
 
     const { blockhash, lastValidBlockHeight } =
@@ -243,7 +340,11 @@ async function depositHandler(
 
     const baseFee = 5000;
     const priorityFeeCost = Math.ceil((priorityFee * computeUnits) / 1_000_000);
-    const estimatedTotalCost = baseFee + priorityFeeCost;
+    const estimatedTotalCost = baseFee + priorityFeeCost + ataCreationCost;
+
+    // Convert ATA creation cost from lamports to USDC (approximate, using a fixed SOL/USDC rate is not reliable;
+    // returning 0 here — caller should factor this in separately if needed)
+    const ataCreationCostInUsdc = 0;
 
     console.log(`[API] /api/deposit - Transaction created successfully`);
     console.log(`[API] /api/deposit - Priority fee: ${priorityFee} microlamports`);
@@ -257,9 +358,9 @@ async function depositHandler(
         priorityFee,
         networkCongestion: "medium",
         estimatedTotalCost,
-        ataCreationCost: 0,
-        ataCreationCount: 0,
-        ataCreationCostInUsdc: 0,
+        ataCreationCost,
+        ataCreationCount,
+        ataCreationCostInUsdc,
         senderPaysAtaCreation: false,
       },
     }, req.headers));

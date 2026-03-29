@@ -27,7 +27,7 @@ import { createEncryptionMiddleware } from "../../utils/encrytption";
 const MEMO_PROGRAM_ID = new PublicKey("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr");
 const USDC_MINT = new PublicKey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"); // USDC mint address
 
-const JUPITER_PRICE_API = "https://lite-api.jup.ag/price/v2";
+const JUPITER_PRICE_API = "https://lite-api.jup.ag/price/v3";
 const SOL_MINT_ADDRESS = "So11111111111111111111111111111111111111112";
 const ATA_RENT_LAMPORTS = 2039280; // rent-exempt minimum for a token account
 const MIN_TRANSFER_AMOUNT = 1_000_000; // 1 USDC minimum net transfer to receiver (6 decimals)
@@ -81,7 +81,8 @@ async function getSolPriceInUsdc(): Promise<number> {
   const response = await fetch(`${JUPITER_PRICE_API}?ids=${SOL_MINT_ADDRESS}`);
   if (!response.ok) throw new Error(`Jupiter price API error: HTTP ${response.status}`);
   const data = await response.json();
-  const price = parseFloat(data?.data?.[SOL_MINT_ADDRESS]?.price);
+  // Response: { "<mint>": { usdPrice: number, ... } }
+  const price = parseFloat(data?.[SOL_MINT_ADDRESS]?.usdPrice);
   if (!price || isNaN(price) || price <= 0) throw new Error("Invalid SOL price returned from Jupiter");
   console.log(`[PRICE] SOL/USDC: $${price}`);
   return price;

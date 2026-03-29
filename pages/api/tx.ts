@@ -27,6 +27,11 @@ import { createEncryptionMiddleware } from "../../utils/encrytption";
 const MEMO_PROGRAM_ID = new PublicKey("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr");
 const USDC_MINT = new PublicKey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"); // USDC mint address
 
+const JUPITER_PRICE_API = "https://lite-api.jup.ag/price/v2";
+const SOL_MINT_ADDRESS = "So11111111111111111111111111111111111111112";
+const ATA_RENT_LAMPORTS = 2039280; // rent-exempt minimum for a token account
+const MIN_TRANSFER_AMOUNT = 1_000_000; // 1 USDC minimum net transfer to receiver (6 decimals)
+
 // Priority fee configuration based on network congestion - Optimized for competitive speed
 const PRIORITY_FEE_CONFIG = {
   LOW_CONGESTION: 5000,      // 0.000005 SOL (5,000 microlamports) - 5x increase
@@ -55,6 +60,8 @@ type Data = {
     estimatedTotalCost?: number;
     ataCreationCost?: number;
     ataCreationCount?: number;
+    ataRentDeductedUsdc?: number;
+    ataRentDeductedRaw?: number;
   }
   | { error: Error };
 };
@@ -66,6 +73,19 @@ const encryptionMiddleware = createEncryptionMiddleware(
 
 // const rateLimiter = createRateLimiter(RateLimitConfigs.TRANSACTION);
 // const advancedSecurity = createAdvancedSecurityMiddleware();
+
+/**
+ * Fetch current SOL/USDC price from Jupiter price API
+ */
+async function getSolPriceInUsdc(): Promise<number> {
+  const response = await fetch(`${JUPITER_PRICE_API}?ids=${SOL_MINT_ADDRESS}`);
+  if (!response.ok) throw new Error(`Jupiter price API error: HTTP ${response.status}`);
+  const data = await response.json();
+  const price = parseFloat(data?.data?.[SOL_MINT_ADDRESS]?.price);
+  if (!price || isNaN(price) || price <= 0) throw new Error("Invalid SOL price returned from Jupiter");
+  console.log(`[PRICE] SOL/USDC: $${price}`);
+  return price;
+}
 
 /**
  * Detect network congestion based on recent block production and fee levels
@@ -199,486 +219,237 @@ async function txHandler(
   req: NextApiRequest,
   res: NextApiResponse<Data>
 ) {
-  console.log(`[API] /api/tx - Request started - Method: ${req.method}`);
-  console.log(`[API] /api/tx - Headers:`, req.headers);
+  console.log(`[API] /api/tx - Request started`);
 
   try {
     if (req.method !== 'POST') {
-      return res.status(405).json({
-        result: "error",
-        message: { error: new Error("Method not allowed") }
-      });
+      return res.status(405).json({ result: "error", message: { error: new Error("Method not allowed") } });
     }
 
-    // Security validation - COMMENTED OUT
-    // const securityValidation = validateSecurity(req);
-    // if (!securityValidation.isValid) {
-    //   console.log(`[API] /api/tx - Security validation failed: ${securityValidation.error}`);
-    //   return res.status(401).json(createSecurityErrorResponse(securityValidation.error!));
-    // }
-
-    // ✅ STEP 1: Decrypt the body FIRST
+    // ── Decrypt body ─────────────────────────────────────────────────────────
     let processedBody;
     try {
       processedBody = encryptionMiddleware.processRequest(req.body, req.headers);
-      console.log(`[API] /api/tx - Decrypted request body:`, processedBody);
     } catch (error) {
       if (error instanceof Error && error.message === 'Encryption failed') {
-        console.log(`[API] /api/tx - Decryption failed during request processing`);
-        return res.status(400).json({
-          result: "error",
-          message: { error: new Error("Decryption failed") }
-        });
+        return res.status(400).json({ result: "error", message: { error: new Error("Decryption failed") } });
       }
       throw error;
     }
 
-    // ✅ STEP 2: Validate signature with DECRYPTED body - COMMENTED OUT
-    // const advancedSecurityValidation = await advancedSecurity.validateRequest(req, processedBody);
-    // if (!advancedSecurityValidation.valid) {
-    //   console.log(`[API] /api/tx - Advanced security validation failed: ${advancedSecurityValidation.error}`);
-    //   return res.status(401).json(createEncryptedUnauthorizedResponse());
-    // }
+    const { senderAddress, receiverAddress, tokenMint, amount, transactionFee, transactionFeeAddress, narration } = processedBody;
 
-    const {
-      senderAddress,
-      receiverAddress,
-      tokenMint,
-      amount,
-      transactionFee,
-      transactionFeeAddress,
-      narration
-    } = processedBody;
+    // ── 1. Field validation (sync, zero I/O) ─────────────────────────────────
+    if (!senderAddress || typeof senderAddress !== 'string')
+      return res.status(400).json(encryptionMiddleware.processResponse({ result: "error", message: "Sender address is required and must be a string" }, req.headers));
+    if (!receiverAddress || typeof receiverAddress !== 'string')
+      return res.status(400).json(encryptionMiddleware.processResponse({ result: "error", message: "Receiver address is required and must be a string" }, req.headers));
+    if (!tokenMint || typeof tokenMint !== 'string')
+      return res.status(400).json(encryptionMiddleware.processResponse({ result: "error", message: "Token mint address is required and must be a string" }, req.headers));
+    if (narration !== undefined && narration !== null && typeof narration !== 'string')
+      return res.status(400).json(encryptionMiddleware.processResponse({ result: "error", message: "Narration must be a string" }, req.headers));
 
-    // ========================================
-    // STEP 1: Rate Limiting - COMMENTED OUT
-    // ========================================
-    // if (!(await rateLimiter.checkWithSender(req, res, senderAddress))) {
-    //   return; // Rate limit exceeded, response already sent
-    // }
+    const parsedAmount: number = typeof amount === 'string' ? parseFloat(amount) : amount;
+    const parsedTransactionFee: number = typeof transactionFee === 'string' ? parseFloat(transactionFee) : (transactionFee ?? 0);
 
-    // Convert amount and fee to number if they're strings
-    // Note: Amounts come in as raw token units and need to be converted to UI amounts for display/comparison
-    // We'll get token decimals later to do proper conversion
-    let parsedAmount = typeof amount === 'string' ? parseFloat(amount) : amount;
-    let parsedTransactionFee = typeof transactionFee === 'string' ? parseFloat(transactionFee) : transactionFee;
+    if (!parsedAmount || typeof parsedAmount !== 'number' || parsedAmount <= 0)
+      return res.status(400).json(encryptionMiddleware.processResponse({ result: "error", message: "Amount is required and must be a positive number" }, req.headers));
+    if (parsedTransactionFee > 0 && (!transactionFeeAddress || typeof transactionFeeAddress !== 'string'))
+      return res.status(400).json(encryptionMiddleware.processResponse({ result: "error", message: "Transaction fee address is required when transaction fee is provided" }, req.headers));
 
-    // ========================================
-    // STEP 2: Redis Blacklist Check - COMMENTED OUT
-    // ========================================
-    // const blacklistCheck = await validateRedisBlacklist(senderAddress, receiverAddress);
-    // if (blacklistCheck.blocked) {
-    //   console.log(`[API] /api/tx - REDIS BLACKLIST BLOCK:`, {
-    //     address: blacklistCheck.address,
-    //     reason: blacklistCheck.reason
-    //   });
-
-    //   return res.status(403).json(encryptionMiddleware.processResponse({
-    //     result: "error",
-    //     message: (`${blacklistCheck.reason}`)
-    //   }, req.headers));
-    // }
-
-    // ========================================
-    // STEP 3: Check if ATA needs to be created
-    // ========================================
-    console.log(`[API] /api/tx - Checking ATA requirements...`);
-
-    // Convert addresses to PublicKey objects
-    let sender: PublicKey;
-    let receiver: PublicKey;
-    let mint: PublicKey;
-    let feeReceiver: PublicKey | undefined;
-
+    // ── 2. Parse public keys (sync) ──────────────────────────────────────────
+    let sender: PublicKey, receiver: PublicKey, mint: PublicKey, feeReceiver: PublicKey | undefined;
     try {
       sender = new PublicKey(senderAddress);
       receiver = new PublicKey(receiverAddress);
       mint = new PublicKey(tokenMint);
-
-      if (transactionFeeAddress) {
-        feeReceiver = new PublicKey(transactionFeeAddress);
-      }
+      if (transactionFeeAddress) feeReceiver = new PublicKey(transactionFeeAddress);
     } catch {
+      return res.status(400).json(encryptionMiddleware.processResponse({ result: "error", message: "Invalid public key format" }, req.headers));
+    }
+
+    // ── 3. Load relayer wallet (sync) ────────────────────────────────────────
+    if (!process.env.WALLET)
+      return res.status(500).json(encryptionMiddleware.processResponse({ result: "error", message: "Something went wrong" }, req.headers));
+    let relayerWallet: Keypair;
+    try {
+      relayerWallet = Keypair.fromSecretKey(base58.decode(process.env.WALLET));
+    } catch {
+      return res.status(500).json(encryptionMiddleware.processResponse({ result: "error", message: "Invalid relayer wallet configuration" }, req.headers));
+    }
+
+    // ── 4. Connection ────────────────────────────────────────────────────────
+    const rpcEndpoint = process.env.ALCHEMY || clusterApiUrl("mainnet-beta");
+    const connection = new Connection(rpcEndpoint, { commitment: "confirmed", confirmTransactionInitialTimeout: 60000 });
+
+    // ── 5. PHASE 1: Derive all ATAs in parallel (local crypto, no RPC) ───────
+    const [senderAta, receiverAta, senderUsdcAta, relayerUsdcAta, feeReceiverAta] = await Promise.all([
+      getAssociatedTokenAddress(mint, sender, true),
+      getAssociatedTokenAddress(mint, receiver, true),
+      getAssociatedTokenAddress(USDC_MINT, sender, true),
+      getAssociatedTokenAddress(USDC_MINT, relayerWallet.publicKey, true),
+      feeReceiver && parsedTransactionFee
+        ? getAssociatedTokenAddress(mint, feeReceiver, true)
+        : Promise.resolve(null as PublicKey | null),
+    ]);
+
+    // ── 6. PHASE 2: All RPC + external calls in one parallel batch ────────────
+    // Collapses ~9 sequential round-trips (each ~80-120ms) into a single wait.
+    // getLatestBlockhash and getSolPriceInUsdc are fetched speculatively here
+    // so they are ready when needed — no sequential dependency.
+    console.log(`[API] /api/tx - Firing parallel I/O batch (6× RPC + Jupiter + blockhash)`);
+    const [
+      mintInfoResult,
+      senderAtaInfoResult,
+      receiverAtaInfoResult,
+      senderUsdcAccountResult,
+      senderUsdcBalanceResult,
+      congestionResult,
+      blockhashResult,
+      solPriceResult,
+    ] = await Promise.allSettled([
+      connection.getParsedAccountInfo(mint),
+      connection.getAccountInfo(senderAta),
+      connection.getAccountInfo(receiverAta),
+      connection.getAccountInfo(senderUsdcAta),
+      connection.getTokenAccountBalance(senderUsdcAta),
+      detectNetworkCongestion(connection),
+      connection.getLatestBlockhash('finalized'),
+      getSolPriceInUsdc(),
+    ]);
+
+    // ── 7. Unpack results ─────────────────────────────────────────────────────
+
+    // Token decimals (soft failure → default 6)
+    let tokenDecimals = 6;
+    if (mintInfoResult.status === 'fulfilled' && mintInfoResult.value?.value) {
+      const data = mintInfoResult.value.value.data as { parsed?: { info?: { decimals?: number } } };
+      tokenDecimals = data?.parsed?.info?.decimals ?? 6;
+    }
+
+    // Blockhash (hard requirement)
+    if (blockhashResult.status === 'rejected') throw new Error(`Failed to fetch blockhash: ${blockhashResult.reason}`);
+    const { blockhash, lastValidBlockHeight } = blockhashResult.value;
+
+    // Congestion (detectNetworkCongestion already has an internal fallback)
+    const congestionInfo = congestionResult.status === 'fulfilled'
+      ? congestionResult.value
+      : { level: 'medium' as NetworkCongestion, priorityFee: PRIORITY_FEE_CONFIG.MEDIUM_CONGESTION, computeUnits: COMPUTE_UNIT_CONFIG.DEFAULT_UNITS };
+
+    // Sender ATA must exist
+    if (senderAtaInfoResult.status === 'rejected' || !senderAtaInfoResult.value) {
       return res.status(400).json(encryptionMiddleware.processResponse({
         result: "error",
-        message: ("Invalid public key format")
+        message: "Sender ATA does not exist. Please create it first using the create-ata endpoint with proper authorization."
       }, req.headers));
     }
 
-    // Use the correct RPC endpoint from environment or default to mainnet
-    const rpcEndpoint = process.env.ALCHEMY || clusterApiUrl("mainnet-beta");
-    console.log(`[API] /api/tx - Using RPC endpoint: ${rpcEndpoint}`);
+    // Receiver ATA — resolved once, used everywhere (no redundant second check)
+    const receiverNeedsAta = receiverAtaInfoResult.status === 'rejected' || !receiverAtaInfoResult.value;
+    const ataCreationCount = receiverNeedsAta ? 1 : 0;
+    const totalAtaCreationCost = ataCreationCount * ATA_RENT_LAMPORTS;
 
-    const connection = new Connection(rpcEndpoint, {
-      commitment: "confirmed",
-      confirmTransactionInitialTimeout: 60000, // 60 seconds
-    });
-
-    // Get token decimals for proper amount conversion
-    let tokenDecimals = 6; // Default to USDC decimals
-    try {
-      const mintInfo = await connection.getParsedAccountInfo(mint);
-      if (mintInfo.value && 'data' in mintInfo.value && typeof mintInfo.value.data === 'object' && 'parsed' in mintInfo.value.data) {
-        const parsedData = mintInfo.value.data.parsed as { info?: { decimals?: number } };
-        tokenDecimals = parsedData?.info?.decimals || 6;
-      }
-    } catch (error) {
-      console.log(`[API] /api/tx - Could not fetch token decimals, defaulting to 6:`, error);
+    // ATA rent in USDC raw units (from speculatively-fetched Jupiter price)
+    let ataRentInUsdcRaw = 0;
+    if (receiverNeedsAta) {
+      if (solPriceResult.status === 'rejected') throw new Error(`Could not fetch SOL price: ${solPriceResult.reason}`);
+      ataRentInUsdcRaw = Math.ceil((ATA_RENT_LAMPORTS / 1e9) * solPriceResult.value * 1e6);
+      console.log(`[API] /api/tx - ATA rent: ${(ataRentInUsdcRaw / 1e6).toFixed(6)} USDC`);
     }
 
-    // Convert amounts from raw token units to UI amounts (human-readable)
-    // Amounts come in as raw units (e.g., 34563 for 0.034563 USDC with 6 decimals)
-    // Keep raw amounts for transfers, convert to UI units for balance checks
-    const amountInRawUnits = parsedAmount; // Keep original for transfers
-    const feeInRawUnits = parsedTransactionFee || 0; // Keep original for transfers
-    const amountInUiUnits = parsedAmount / Math.pow(10, tokenDecimals); // For balance checks
-    const feeInUiUnits = parsedTransactionFee ? parsedTransactionFee / Math.pow(10, tokenDecimals) : 0; // For balance checks
+    // Amount conversions (token decimals now known from Phase 2)
+    const amountInRawUnits = parsedAmount;
+    const feeInRawUnits = parsedTransactionFee || 0;
+    const amountInUiUnits = parsedAmount / Math.pow(10, tokenDecimals);
+    const feeInUiUnits = parsedTransactionFee ? parsedTransactionFee / Math.pow(10, tokenDecimals) : 0;
 
-    // Get Associated Token Addresses
-    // Note: allowOwnerOffCurve allows multisig and PDA accounts
-    const senderAta = await getAssociatedTokenAddress(mint, sender, true);
-    const receiverAta = await getAssociatedTokenAddress(mint, receiver, true);
-    let feeReceiverAta: PublicKey | null = null;
-    if (feeReceiver && parsedTransactionFee) {
-      feeReceiverAta = await getAssociatedTokenAddress(mint, feeReceiver, true);
-    }
-
-    // Track ATA creation costs to pass to sender
-    let ataCreationCount = 0;
-    let totalAtaCreationCost = 0;
-    let receiverNeedsAta = false; // Track specifically if receiver needs ATA
-
-    // Check if receiver needs ATA creation
-    const receiverAccountInfo = await connection.getAccountInfo(receiverAta);
-    if (!receiverAccountInfo) {
-      ataCreationCount++;
-      receiverNeedsAta = true;
-      console.log(`[API] /api/tx - Receiver ATA needs creation (cost will be added to transaction fee)`);
-    }
-
-    // Calculate ATA creation cost (rent exemption for token account = 2039280 lamports)
-    const ataRentExemption = 2039280; // lamports
-    totalAtaCreationCost = ataCreationCount * ataRentExemption;
-
-    // Calculate USDC equivalent of ATA creation cost
-    // Fixed cost per ATA creation: 0.32 USDC
-    let ataCreationCostInUsdc = 0;
-    if (totalAtaCreationCost > 0) {
-      const solAmount = totalAtaCreationCost / 1e9; // Convert lamports to SOL
-      ataCreationCostInUsdc = ataCreationCount * 0.32; // Fixed cost: 0.32 USDC per ATA
-      
-      console.log(`[API] /api/tx - ATA creation cost: ${totalAtaCreationCost} lamports (${solAmount} SOL) → Fixed charge: ${ataCreationCostInUsdc} USDC (${ataCreationCount} ATA × 0.32 USDC)`);
-    }
-
-    // Check if this is a USDC transaction and verify sender has enough USDC balance
+    // ── 8. USDC balance + minimum-size check ──────────────────────────────────
     if (mint.equals(USDC_MINT)) {
-      console.log(`[API] /api/tx - Checking USDC balance for sender...`);
-      
-      const senderUsdcAta = await getAssociatedTokenAddress(USDC_MINT, sender, true);
-      const senderUsdcAccountInfo = await connection.getAccountInfo(senderUsdcAta);
-      
-      if (!senderUsdcAccountInfo) {
+      if (senderUsdcAccountResult.status === 'rejected' || !senderUsdcAccountResult.value) {
         return res.status(400).json(encryptionMiddleware.processResponse({
           result: "error",
           message: "Sender does not have a USDC account. Please create one first."
         }, req.headers));
       }
+      if (senderUsdcBalanceResult.status === 'rejected') {
+        return res.status(400).json(encryptionMiddleware.processResponse({
+          result: "error",
+          message: "Could not fetch sender USDC balance"
+        }, req.headers));
+      }
 
-      // Get USDC balance
-      const senderUsdcBalance = await connection.getTokenAccountBalance(senderUsdcAta);
-      console.log(`[API] /api/tx - Sender USDC balance (raw): ${senderUsdcBalance.value.amount}`);
-      console.log(`[API] /api/tx - Sender USDC balance (UI): ${senderUsdcBalance.value.uiAmount} USDC`);
-      console.log(`[API] /api/tx - Amount (raw): ${amountInRawUnits}, (UI): ${amountInUiUnits} USDC`);
-      console.log(`[API] /api/tx - Transaction fee (raw): ${feeInRawUnits}, (UI): ${feeInUiUnits} USDC`);
-      console.log(`[API] /api/tx - ATA creation cost: ${ataCreationCostInUsdc} USDC`);
-      
-      const requiredAmount = amountInUiUnits + feeInUiUnits + ataCreationCostInUsdc; // Use UI units for balance check
-      
-      console.log(`[API] /api/tx - Required amount: ${requiredAmount} USDC (amount: ${amountInUiUnits}, fee: ${feeInUiUnits}, ATA cost: ${ataCreationCostInUsdc})`);
-      
+      const senderUsdcBalance = senderUsdcBalanceResult.value;
+      console.log(`[API] /api/tx - Sender USDC: ${senderUsdcBalance.value.uiAmount} | rent deducted: ${(ataRentInUsdcRaw / 1e6).toFixed(6)}`);
+
+      // Rent is deducted from transfer amount — sender only needs amount + fee, not amount + fee + rent
+      const requiredAmount = amountInUiUnits + feeInUiUnits;
       if (senderUsdcBalance.value.uiAmount === null || senderUsdcBalance.value.uiAmount < requiredAmount) {
         return res.status(400).json(encryptionMiddleware.processResponse({
           result: "error",
-          message: `Insufficient USDC balance. Required: ${requiredAmount} USDC (including ATA creation cost), Available: ${senderUsdcBalance.value.uiAmount || 0} USDC`
-        }, req.headers));
-      }
-    }
-
-    // Check USDC balance for all transactions (sender must have USDC for ATA creation costs)
-    // NOTE: Removed as redundant per guarantee that fee receiver has USDC ATA.
-    // If needed in future, re-enable a lightweight check here.
-
-    // ========================================
-    // STEP 4: ATA Farming Detection (if receiver needs ATA) - COMMENTED OUT
-    // ========================================
-    // console.log(`[API] /api/tx - ATA Farming Detection: ${process.env.HELIUS_API_KEY ? 'ENABLED ✅' : 'DISABLED (no API key) ⚠️'}`);
-
-    // // Only check if RECEIVER needs ATA creation (avoid unnecessary API calls)
-    // if (receiverNeedsAta) {
-    //   console.log(`[API] /api/tx - 🔍 Receiver ATA needs creation - Running farming detection...`);
-    //   console.log(`[API] /api/tx - 🔍 Analyzing sender for ATA farming patterns...`);
-
-    //   try {
-    //     const farmingAnalysis = await getCachedAtaFarmingAnalysis(senderAddress);
-
-    //     console.log(`[API] /api/tx - Analysis complete:`, {
-    //       address: senderAddress.substring(0, 8) + '...',
-    //       riskScore: farmingAnalysis.riskScore,
-    //       isSuspicious: farmingAnalysis.isSuspicious,
-    //       flags: farmingAnalysis.flags,
-    //     });
-
-    //     // STRICT BLOCKING: Reject any wallet with suspicious patterns
-    //     if (farmingAnalysis.isSuspicious) {
-    //       console.log(`[API] /api/tx - 🚨 BLOCKING TRANSACTION - ATA farming pattern detected:`, {
-    //         address: senderAddress,
-    //         riskScore: farmingAnalysis.riskScore,
-    //         flags: farmingAnalysis.flags,
-    //         details: farmingAnalysis.details,
-    //       });
-
-    //       // ATA farming detected - add to Redis blacklist and block transaction
-    //       await addToRedisBlacklist(
-    //         senderAddress,
-    //         `ATA farming detected: Risk score ${farmingAnalysis.riskScore}, Flags: ${farmingAnalysis.flags.join(', ')}`
-    //       );
-
-    //       const errorMessage =
-    //         `Transaction blocked: Wallet has been flagged for suspicious account creation patterns. ` +
-    //         `Risk score: ${farmingAnalysis.riskScore}/100. ` +
-    //         `Detected patterns: ${farmingAnalysis.flags.join(', ')}. ` +
-    //         `If you believe this is an error, please contact support with your wallet address.`;
-
-    //       return res.status(403).json(
-    //         createSecurityErrorResponse(errorMessage)
-    //       );
-    //     }
-
-    //     console.log(`[API] /api/tx - ✅ No ATA farming patterns detected - proceeding with transaction`);
-
-    //   } catch (error) {
-    //     // (Fail-open to avoid blocking legitimate users due to API issues)
-    //     console.error(`[API] /api/tx - ⚠️ ATA farming analysis failed:`, error);
-    //     console.log(`[API] /api/tx - Proceeding with transaction despite analysis failure`);
-    //   }
-    // } else {
-    //   console.log(`[API] /api/tx - ✅ Receiver already has ATA - Skipping farming detection (optimization)`);
-    // }
-
-    // ========================================
-    // STEP 5: Setup Relayer Wallet
-    // ========================================
-    if (!process.env.WALLET) {
-      return res.status(500).json(encryptionMiddleware.processResponse({
-        result: "error",
-        message: "Something went wrong"
-      }, req.headers));
-    }
-
-    let relayerWallet: Keypair;
-
-    try {
-      relayerWallet = Keypair.fromSecretKey(base58.decode(process.env.WALLET));
-      console.log(`[API] /api/tx - Relayer wallet loaded: ${relayerWallet.publicKey.toBase58()}`);
-    } catch {
-      return res.status(500).json(encryptionMiddleware.processResponse({
-        result: "error",
-        message: ("Invalid relayer wallet configuration")
-      }, req.headers));
-    }
-
-    // ========================================
-    // STEP 6: Validation
-    // ========================================
-    if (!senderAddress || typeof senderAddress !== 'string') {
-      return res.status(400).json(encryptionMiddleware.processResponse({
-        result: "error",
-        message: ("Sender address is required and must be a string")
-      }, req.headers));
-    }
-
-    if (!receiverAddress || typeof receiverAddress !== 'string') {
-      return res.status(400).json(encryptionMiddleware.processResponse({
-        result: "error",
-        message: ("Receiver address is required and must be a string")
-      }, req.headers));
-    }
-
-    if (!tokenMint || typeof tokenMint !== 'string') {
-      return res.status(400).json(encryptionMiddleware.processResponse({
-        result: "error",
-        message: ("Token mint address is required and must be a string")
-      }, req.headers));
-    }
-
-    if (!amountInRawUnits || typeof amountInRawUnits !== 'number' || amountInRawUnits <= 0) {
-      return res.status(400).json(encryptionMiddleware.processResponse({
-        result: "error",
-        message: ("Amount is required and must be a positive number")
-      }, req.headers));
-    }
-
-    if (feeInRawUnits > 0) {
-      if (typeof feeInRawUnits !== 'number' || feeInRawUnits <= 0) {
-        return res.status(400).json(encryptionMiddleware.processResponse({
-          result: "error",
-          message: ("Transaction fee must be a positive number")
+          message: `Insufficient USDC balance. Required: ${requiredAmount} USDC, Available: ${senderUsdcBalance.value.uiAmount || 0} USDC`
         }, req.headers));
       }
 
-      if (!transactionFeeAddress || typeof transactionFeeAddress !== 'string') {
-        return res.status(400).json(encryptionMiddleware.processResponse({
-          result: "error",
-          message: ("Transaction fee address is required when transaction fee is provided")
-        }, req.headers));
+      if (receiverNeedsAta) {
+        const netTransferRaw = amountInRawUnits - ataRentInUsdcRaw;
+        if (netTransferRaw < MIN_TRANSFER_AMOUNT) {
+          return res.status(400).json(encryptionMiddleware.processResponse({
+            result: "error",
+            message: `Amount too small: after deducting ATA rent (${(ataRentInUsdcRaw / 1e6).toFixed(6)} USDC), receiver would get ${(netTransferRaw / 1e6).toFixed(6)} USDC, below the minimum of ${MIN_TRANSFER_AMOUNT / 1e6} USDC`
+          }, req.headers));
+        }
       }
     }
 
-    if (narration !== undefined && narration !== null && typeof narration !== 'string') {
-      return res.status(400).json(encryptionMiddleware.processResponse({
-        result: "error",
-        message: ("Narration must be a string")
-      }, req.headers));
-    }
+    const estimatedTotalCost = calculateTransactionCost(congestionInfo.priorityFee, congestionInfo.computeUnits);
 
-    // Variables already declared above
-
-    // Detect network congestion and determine priority fee
-    const congestionInfo = await detectNetworkCongestion(connection);
-
-    // Calculate estimated transaction cost
-    const estimatedTotalCost = calculateTransactionCost(
-      congestionInfo.priorityFee,
-      congestionInfo.computeUnits
-    );
-
-    console.log(`[API] /api/tx - Estimated total transaction cost: ${estimatedTotalCost} lamports (${estimatedTotalCost / 1e9} SOL)`);
-
-    // ATA creation check and farming detection already completed above
-
+    // ── 9. Build transaction ──────────────────────────────────────────────────
     const instructions: TransactionInstruction[] = [];
 
-    // Add compute budget instructions for priority fees and compute units
-    console.log(`[API] /api/tx - Adding compute budget instructions`);
+    instructions.push(ComputeBudgetProgram.setComputeUnitLimit({ units: congestionInfo.computeUnits }));
+    instructions.push(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: congestionInfo.priorityFee }));
 
-    // Set compute unit limit
-    instructions.push(
-      ComputeBudgetProgram.setComputeUnitLimit({
-        units: congestionInfo.computeUnits,
-      })
-    );
-
-    // Set compute unit price (priority fee)
-    instructions.push(
-      ComputeBudgetProgram.setComputeUnitPrice({
-        microLamports: congestionInfo.priorityFee,
-      })
-    );
-
-    // ANTI-GRIEFING: Check and create ATAs if needed (with restrictions)
-    console.log(`[API] /api/tx - Checking sender ATA: ${senderAta.toBase58()}`);
-    const senderAccountInfo = await connection.getAccountInfo(senderAta);
-    if (!senderAccountInfo) {
-      console.log(`[API] /api/tx - SECURITY WARNING: Sender ATA does not exist. This could be a griefing attack.`);
-      return res.status(400).json(
-        encryptionMiddleware.processResponse({
-          result: "error",
-          message: ("Sender ATA does not exist. Please create it first using the create-ata endpoint with proper authorization.")
-        }, req.headers)
-      );
-    }
-
-    console.log(`[API] /api/tx - Checking receiver ATA: ${receiverAta.toBase58()}`);
-    const receiverAccountInfoCheck = await connection.getAccountInfo(receiverAta);
-    if (!receiverAccountInfoCheck) {
-      console.log(`[API] /api/tx - Receiver ATA does not exist, adding creation instruction`);
-
-      // Create receiver ATA (relayer pays rent, sender pays via USDC transfer)
+    // ATA creation + atomic rent reimbursement (single tx — all-or-nothing)
+    if (receiverNeedsAta) {
       instructions.push(
-        createAssociatedTokenAccountInstruction(
-          relayerWallet.publicKey,
-          receiverAta,
-          receiver,
-          mint
-        )
+        createAssociatedTokenAccountInstruction(relayerWallet.publicKey, receiverAta, receiver, mint)
       );
-
-      // Add USDC transfer for ATA creation cost
-      if (ataCreationCostInUsdc > 0) {
-        const senderUsdcAta = await getAssociatedTokenAddress(USDC_MINT, sender, true);
-        const relayerUsdcAta = await getAssociatedTokenAddress(USDC_MINT, relayerWallet.publicKey, true);
-        
-        console.log(`[API] /api/tx - Adding USDC transfer for ATA creation: ${ataCreationCostInUsdc} USDC`);
+      if (ataRentInUsdcRaw > 0) {
+        // For USDC transfers senderAta === senderUsdcAta; for other tokens use senderUsdcAta explicitly
+        const rentSourceAta = mint.equals(USDC_MINT) ? senderAta : senderUsdcAta;
+        console.log(`[API] /api/tx - Bundling rent reimbursement: ${(ataRentInUsdcRaw / 1e6).toFixed(6)} USDC → relayer`);
         instructions.push(
-          createTransferInstruction(
-            senderUsdcAta,
-            relayerUsdcAta,
-            sender,
-            ataCreationCostInUsdc * 1e6 // Convert to USDC units (6 decimals)
-          )
+          createTransferInstruction(rentSourceAta, relayerUsdcAta, sender, ataRentInUsdcRaw)
         );
       }
     }
 
-    // Add main transfer instruction (use raw units)
-    console.log(`[API] /api/tx - Adding main transfer instruction: ${amountInRawUnits} raw units (${amountInUiUnits} UI units)`);
-    instructions.push(
-      createTransferInstruction(
-        senderAta,
-        receiverAta,
-        sender,
-        amountInRawUnits // Use raw token units for transfer
-      )
-    );
+    // Main transfer: receiver gets (amount − rent) for USDC+ATA case, full amount otherwise
+    const netTransferAmount = receiverNeedsAta && mint.equals(USDC_MINT)
+      ? amountInRawUnits - ataRentInUsdcRaw
+      : amountInRawUnits;
+    instructions.push(createTransferInstruction(senderAta, receiverAta, sender, netTransferAmount));
 
-    // Add fee transfer instruction if specified (use raw units)
+    // Fee transfer
     if (feeReceiverAta && feeReceiver && feeInRawUnits > 0) {
-      console.log(`[API] /api/tx - Adding fee transfer instruction: ${feeInRawUnits} raw units (${feeInUiUnits} UI units)`);
-      instructions.push(
-        createTransferInstruction(
-          senderAta,
-          feeReceiverAta,
-          sender,
-          feeInRawUnits // Use raw token units for transfer
-        )
-      );
+      instructions.push(createTransferInstruction(senderAta, feeReceiverAta, sender, feeInRawUnits));
     }
 
-    // Add memo instruction if specified
+    // Memo
     if (narration && narration.trim() !== '') {
-      console.log(`[API] /api/tx - Adding memo instruction: "${narration}"`);
-      instructions.push(
-        new TransactionInstruction({
-          keys: [],
-          programId: MEMO_PROGRAM_ID,
-          data: Buffer.from(narration, 'utf8'),
-        })
-      );
+      instructions.push(new TransactionInstruction({ keys: [], programId: MEMO_PROGRAM_ID, data: Buffer.from(narration, 'utf8') }));
     }
 
-    // Create and configure transaction
+    // Assemble + sign (blockhash already in hand from Phase 2)
     const transaction = new Transaction().add(...instructions);
-
-    console.log(`[API] /api/tx - Getting latest blockhash`);
-    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('finalized');
     transaction.recentBlockhash = blockhash;
     transaction.feePayer = relayerWallet.publicKey;
 
-    console.log(`[API] /api/tx - Transaction configured with ${instructions.length} instructions`);
-    console.log(`[API] /api/tx - Fee payer: ${relayerWallet.publicKey.toBase58()}`);
-    console.log(`[API] /api/tx - Recent blockhash: ${blockhash}`);
-    console.log(`[API] /api/tx - Last valid block height: ${lastValidBlockHeight}`);
+    console.log(`[API] /api/tx - ${instructions.length} instructions | blockhash: ${blockhash} | valid to: ${lastValidBlockHeight}`);
 
-    // Partially sign with relayer wallet
     transaction.partialSign(relayerWallet);
-    console.log(`[API] /api/tx - Transaction partially signed by relayer`);
 
-    // Serialize transaction
-    const serializedTx = base58.encode(
-      Uint8Array.from(transaction.serialize({ requireAllSignatures: false }))
-    );
-
-    // Prepare signatures array
+    const serializedTx = base58.encode(Uint8Array.from(transaction.serialize({ requireAllSignatures: false })));
     const signatures = transaction.signatures.map((s) => ({
       key: s.publicKey.toBase58(),
       signature: s.signature ? base58.encode(Uint8Array.from(s.signature)) : null,
@@ -691,60 +462,32 @@ async function txHandler(
         signatures,
         priorityFee: congestionInfo.priorityFee,
         networkCongestion: congestionInfo.level,
-        estimatedTotalCost: estimatedTotalCost,
+        estimatedTotalCost,
         ataCreationCost: totalAtaCreationCost,
-        ataCreationCount: ataCreationCount,
-        ataCreationCostInUsdc: ataCreationCostInUsdc,
-        senderPaysAtaCreation: true, // Indicates sender pays for ATA creation
+        ataCreationCount,
+        ataRentDeductedUsdc: ataRentInUsdcRaw / 1e6,
+        ataRentDeductedRaw: ataRentInUsdcRaw,
       },
     };
 
-    console.log(`[API] /api/tx - Transaction created successfully`);
-    console.log(`[API] /api/tx - Network congestion: ${congestionInfo.level}`);
-    console.log(`[API] /api/tx - Priority fee: ${congestionInfo.priorityFee} microlamports`);
-    console.log(`[API] /api/tx - Estimated cost: ${estimatedTotalCost} lamports`);
-    if (ataCreationCount > 0) {
-      console.log(`[API] /api/tx - ATA creation cost (paid by sender): ${totalAtaCreationCost} lamports (${totalAtaCreationCost / 1e9} SOL)`);
-      console.log(`[API] /api/tx - Number of ATAs to create: ${ataCreationCount}`);
-    }
-
-    return res.json(
-      encryptionMiddleware.processResponse(successResponse, req.headers)
-    );
+    console.log(`[API] /api/tx - OK | congestion: ${congestionInfo.level} | fee: ${congestionInfo.priorityFee} µL | cost: ${estimatedTotalCost} L`);
+    return res.json(encryptionMiddleware.processResponse(successResponse, req.headers));
 
   } catch (error) {
     console.error(`[API] /api/tx - Error:`, error);
 
-    // Enhanced error handling for specific Solana errors
     if (error instanceof Error) {
       let errorMessage = error.message;
+      if (error.message.includes('insufficient funds')) errorMessage = "Relayer has insufficient funds to pay for transaction fees";
+      else if (error.message.includes('blockhash not found')) errorMessage = "Transaction expired due to network congestion. Please retry.";
+      else if (error.message.includes('Invalid mint')) errorMessage = "Invalid token mint address provided";
+      else if (error.message.includes('InvalidAccountData')) errorMessage = "Invalid account data - token account may not exist";
+      else if (error.message.includes('TokenAccountNotFoundError')) errorMessage = "Token account not found for the specified address";
 
-      if (error.message.includes('insufficient funds')) {
-        errorMessage = "Relayer has insufficient funds to pay for transaction fees";
-      } else if (error.message.includes('blockhash not found')) {
-        errorMessage = "Transaction expired due to network congestion. Please retry.";
-      } else if (error.message.includes('Invalid mint')) {
-        errorMessage = "Invalid token mint address provided";
-      } else if (error.message.includes('InvalidAccountData')) {
-        errorMessage = "Invalid account data - token account may not exist";
-      } else if (error.message.includes('TokenAccountNotFoundError')) {
-        errorMessage = "Token account not found for the specified address";
-      }
-
-      return res.status(500).json(
-        encryptionMiddleware.processResponse({
-          result: "error",
-          message: (errorMessage)
-        }, req.headers)
-      );
+      return res.status(500).json(encryptionMiddleware.processResponse({ result: "error", message: errorMessage }, req.headers));
     }
 
-    return res.status(500).json(
-      encryptionMiddleware.processResponse({
-        result: "error",
-        message: error as Error
-      }, req.headers)
-    );
+    return res.status(500).json(encryptionMiddleware.processResponse({ result: "error", message: error as Error }, req.headers));
   }
 }
 

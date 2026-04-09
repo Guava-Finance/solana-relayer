@@ -46,9 +46,18 @@ export default async function handler(
     const orgId = process.env.TURNKEY_ORGANIZATION_ID!;
     const client = buildClient();
 
-    // Resolve admin userId.
-    const whoami = await client.getWhoami({ organizationId: orgId });
-    const userId = whoami.userId;
+    // Resolve the root user's UUID.
+    //
+    // getWhoami() can return a credential-scoped ID in some API-key
+    // configurations — which is not a valid v4 UUID and is rejected by
+    // initImportWallet.  Fetching users explicitly always yields proper
+    // v4 UUIDs for every user in the organisation.
+    const usersResp = await client.getUsers({ organizationId: orgId });
+    if (!usersResp.users.length) {
+      return res.status(500).json({ error: "No users found in Turnkey organisation" });
+    }
+    // Use the first (root) user — in a single-org setup this is the admin.
+    const userId = usersResp.users[0].userId;
 
     // Ask Turnkey's enclave to generate an import bundle (HPKE public key).
     // createActivityPoller polls until the activity reaches a terminal state

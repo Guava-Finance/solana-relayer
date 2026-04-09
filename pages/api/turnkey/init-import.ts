@@ -44,20 +44,48 @@ export default async function handler(
 
   try {
     const orgId = process.env.TURNKEY_ORGANIZATION_ID!;
+    const apiPublicKey = process.env.TURNKEY_API_PUBLIC_KEY!;
     const client = buildClient();
 
-    // Resolve the root user's UUID.
+    // Resolve the userId that belongs to the API key we are stamping with.
     //
-    // getWhoami() can return a credential-scoped ID in some API-key
-    // configurations — which is not a valid v4 UUID and is rejected by
-    // initImportWallet.  Fetching users explicitly always yields proper
-    // v4 UUIDs for every user in the organisation.
+    // getWhoami() can return a credential-scoped or org-scoped ID (not a v4
+    // UUID) when the API key is a root-org key rather than a per-user key.
+    // getUsers()[0] is also unreliable — the first user may not own this key.
+    //
+    // The only reliable approach: fetch every user with their embedded apiKeys
+    // list and match credential.publicKey against TURNKEY_API_PUBLIC_KEY.
+    // Every real Turnkey user has a proper v4 UUID as userId, which satisfies
+    // Turnkey's initImportWallet / importWallet validation.
     const usersResp = await client.getUsers({ organizationId: orgId });
-    if (!usersResp.users.length) {
-      return res.status(500).json({ error: "No users found in Turnkey organisation" });
+
+    let userId: string | undefined;
+    for (const user of usersResp.users) {
+      const match = user.apiKeys.find(
+        (k) => k.credential.publicKey === apiPublicKey
+      );
+      if (match) {
+        userId = user.userId;
+        break;
+      }
     }
-    // Use the first (root) user — in a single-org setup this is the admin.
-    const userId = usersResp.users[0].userId;
+
+    if (!userId) {
+      console.error(
+        `[turnkey/init-import] No user found for API public key ${apiPublicKey}. Users in org:`,
+        usersResp.users.map((u) => ({
+          userId: u.userId,
+          userName: u.userName,
+          keyCount: u.apiKeys.length,
+          keys: u.apiKeys.map((k) => k.credential.publicKey),
+        }))
+      );
+      return res.status(500).json({
+        error:
+          "Could not resolve Turnkey userId from TURNKEY_API_PUBLIC_KEY. " +
+          "Ensure the API key belongs to a user in the organisation.",
+      });
+    }
 
     // Ask Turnkey's enclave to generate an import bundle (HPKE public key).
     // createActivityPoller polls until the activity reaches a terminal state

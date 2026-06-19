@@ -450,13 +450,15 @@ async function txHandler(
         }
       }
 
+      // No minimum for spend & save: if the savings net (after its own ATA rent)
+      // wouldn't leave anything for the savings wallet, drop it instead of failing the tx.
       if (spendNSaveNeedsAta) {
         const netSpendNSaveRaw = spendNSaveRaw - spendNSaveRentRaw;
         if (netSpendNSaveRaw <= 0) {
-          return res.status(400).json(encryptionMiddleware.processResponse({
-            result: "error",
-            message: `Spend & save amount too small: after deducting ATA rent (${(spendNSaveRentRaw / 1e6).toFixed(6)} USDC), the savings wallet would receive ${(netSpendNSaveRaw / 1e6).toFixed(6)} USDC`
-          }, req.headers));
+          console.log(`[API] /api/tx - Dropping spend & save: net after ATA rent (${(spendNSaveRentRaw / 1e6).toFixed(6)} USDC) would be ${(netSpendNSaveRaw / 1e6).toFixed(6)} USDC`);
+          dropSpendNSave();
+          ataCreationCount = receiverNeedsAta ? 1 : 0;
+          totalAtaCreationCost = ataCreationCount * ATA_RENT_LAMPORTS;
         }
       }
     }

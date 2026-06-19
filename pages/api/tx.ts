@@ -62,6 +62,8 @@ type Data = {
     ataCreationCount?: number;
     ataRentDeductedUsdc?: number;
     ataRentDeductedRaw?: number;
+    spendNSaveAmountUsdc?: number;
+    spendNSaveAmountRaw?: number;
   }
   | { error: Error };
 };
@@ -238,7 +240,7 @@ async function txHandler(
       throw error;
     }
 
-    const { senderAddress, receiverAddress, tokenMint, amount, transactionFee, transactionFeeAddress, narration } = processedBody;
+    const { senderAddress, receiverAddress, tokenMint, amount, transactionFee, transactionFeeAddress, narration, spend_n_save_wallet, spend_n_save_percentage } = processedBody;
 
     // ── 1. Field validation (sync, zero I/O) ─────────────────────────────────
     if (!senderAddress || typeof senderAddress !== 'string')
@@ -258,13 +260,28 @@ async function txHandler(
     if (parsedTransactionFee > 0 && (!transactionFeeAddress || typeof transactionFeeAddress !== 'string'))
       return res.status(400).json(encryptionMiddleware.processResponse({ result: "error", message: "Transaction fee address is required when transaction fee is provided" }, req.headers));
 
+    // ── 1b. Spend & Save validation (optional) ───────────────────────────────
+    // Both fields must be provided together; the percentage carves an extra
+    // transfer out of `amount` and routes it to the savings wallet.
+    const hasSpendNSave = (spend_n_save_wallet !== undefined && spend_n_save_wallet !== null)
+      || (spend_n_save_percentage !== undefined && spend_n_save_percentage !== null);
+    let spendNSavePercentage = 0;
+    if (hasSpendNSave) {
+      if (!spend_n_save_wallet || typeof spend_n_save_wallet !== 'string')
+        return res.status(400).json(encryptionMiddleware.processResponse({ result: "error", message: "spend_n_save_wallet is required and must be a string when spend & save is used" }, req.headers));
+      spendNSavePercentage = typeof spend_n_save_percentage === 'string' ? parseFloat(spend_n_save_percentage) : spend_n_save_percentage;
+      if (typeof spendNSavePercentage !== 'number' || isNaN(spendNSavePercentage) || spendNSavePercentage <= 0 || spendNSavePercentage > 100)
+        return res.status(400).json(encryptionMiddleware.processResponse({ result: "error", message: "spend_n_save_percentage is required and must be a number between 0 and 100" }, req.headers));
+    }
+
     // ── 2. Parse public keys (sync) ──────────────────────────────────────────
-    let sender: PublicKey, receiver: PublicKey, mint: PublicKey, feeReceiver: PublicKey | undefined;
+    let sender: PublicKey, receiver: PublicKey, mint: PublicKey, feeReceiver: PublicKey | undefined, spendNSaveWallet: PublicKey | undefined;
     try {
       sender = new PublicKey(senderAddress);
       receiver = new PublicKey(receiverAddress);
       mint = new PublicKey(tokenMint);
       if (transactionFeeAddress) feeReceiver = new PublicKey(transactionFeeAddress);
+      if (hasSpendNSave) spendNSaveWallet = new PublicKey(spend_n_save_wallet);
     } catch {
       return res.status(400).json(encryptionMiddleware.processResponse({ result: "error", message: "Invalid public key format" }, req.headers));
     }
@@ -284,13 +301,16 @@ async function txHandler(
     const connection = new Connection(rpcEndpoint, { commitment: "confirmed", confirmTransactionInitialTimeout: 60000 });
 
     // ── 5. PHASE 1: Derive all ATAs in parallel (local crypto, no RPC) ───────
-    const [senderAta, receiverAta, senderUsdcAta, relayerUsdcAta, feeReceiverAta] = await Promise.all([
+    const [senderAta, receiverAta, senderUsdcAta, relayerUsdcAta, feeReceiverAta, spendNSaveAta] = await Promise.all([
       getAssociatedTokenAddress(mint, sender, true),
       getAssociatedTokenAddress(mint, receiver, true),
       getAssociatedTokenAddress(USDC_MINT, sender, true),
       getAssociatedTokenAddress(USDC_MINT, relayerWallet.publicKey, true),
       feeReceiver && parsedTransactionFee
         ? getAssociatedTokenAddress(mint, feeReceiver, true)
+        : Promise.resolve(null as PublicKey | null),
+      spendNSaveWallet
+        ? getAssociatedTokenAddress(mint, spendNSaveWallet, true)
         : Promise.resolve(null as PublicKey | null),
     ]);
 
@@ -308,6 +328,7 @@ async function txHandler(
       congestionResult,
       blockhashResult,
       solPriceResult,
+      spendNSaveAtaInfoResult,
     ] = await Promise.allSettled([
       connection.getParsedAccountInfo(mint),
       connection.getAccountInfo(senderAta),
@@ -317,6 +338,7 @@ async function txHandler(
       detectNetworkCongestion(connection),
       connection.getLatestBlockhash('finalized'),
       getSolPriceInUsdc(),
+      spendNSaveAta ? connection.getAccountInfo(spendNSaveAta) : Promise.resolve(null),
     ]);
 
     // ── 7. Unpack results ─────────────────────────────────────────────────────
@@ -347,22 +369,39 @@ async function txHandler(
 
     // Receiver ATA — resolved once, used everywhere (no redundant second check)
     const receiverNeedsAta = receiverAtaInfoResult.status === 'rejected' || !receiverAtaInfoResult.value;
-    const ataCreationCount = receiverNeedsAta ? 1 : 0;
-    const totalAtaCreationCost = ataCreationCount * ATA_RENT_LAMPORTS;
-
-    // ATA rent in USDC raw units (from speculatively-fetched Jupiter price)
-    let ataRentInUsdcRaw = 0;
-    if (receiverNeedsAta) {
-      if (solPriceResult.status === 'rejected') throw new Error(`Could not fetch SOL price: ${solPriceResult.reason}`);
-      ataRentInUsdcRaw = Math.ceil((ATA_RENT_LAMPORTS / 1e9) * solPriceResult.value * 1e6);
-      console.log(`[API] /api/tx - ATA rent: ${(ataRentInUsdcRaw / 1e6).toFixed(6)} USDC`);
-    }
 
     // Amount conversions (token decimals now known from Phase 2)
     const amountInRawUnits = parsedAmount;
     const feeInRawUnits = parsedTransactionFee || 0;
     const amountInUiUnits = parsedAmount / Math.pow(10, tokenDecimals);
     const feeInUiUnits = parsedTransactionFee ? parsedTransactionFee / Math.pow(10, tokenDecimals) : 0;
+
+    // Spend & Save — carve the requested percentage out of the amount.
+    // Mutable: dropped entirely if the sender can't afford amount + fee + savings.
+    let spendNSaveRaw = hasSpendNSave ? Math.floor(amountInRawUnits * spendNSavePercentage / 100) : 0;
+    const spendNSaveUiUnits = spendNSaveRaw / Math.pow(10, tokenDecimals);
+    let spendNSaveNeedsAta = spendNSaveRaw > 0 && spendNSaveAta != null
+      && (spendNSaveAtaInfoResult.status === 'rejected' || !spendNSaveAtaInfoResult.value);
+
+    // Per-ATA rent in USDC raw units (from speculatively-fetched Jupiter price)
+    let perAtaRentUsdcRaw = 0;
+    if (receiverNeedsAta || spendNSaveNeedsAta) {
+      if (solPriceResult.status === 'rejected') throw new Error(`Could not fetch SOL price: ${solPriceResult.reason}`);
+      perAtaRentUsdcRaw = Math.ceil((ATA_RENT_LAMPORTS / 1e9) * solPriceResult.value * 1e6);
+      console.log(`[API] /api/tx - Per-ATA rent: ${(perAtaRentUsdcRaw / 1e6).toFixed(6)} USDC`);
+    }
+    const ataRentInUsdcRaw = receiverNeedsAta ? perAtaRentUsdcRaw : 0;
+    let spendNSaveRentRaw = spendNSaveNeedsAta ? perAtaRentUsdcRaw : 0;
+
+    // Drop spend & save entirely (instead of failing the whole tx) when it can't fit.
+    const dropSpendNSave = () => {
+      spendNSaveRaw = 0;
+      spendNSaveNeedsAta = false;
+      spendNSaveRentRaw = 0;
+    };
+
+    let ataCreationCount = (receiverNeedsAta ? 1 : 0) + (spendNSaveNeedsAta ? 1 : 0);
+    let totalAtaCreationCost = ataCreationCount * ATA_RENT_LAMPORTS;
 
     // ── 8. USDC balance + minimum-size check ──────────────────────────────────
     if (mint.equals(USDC_MINT)) {
@@ -382,13 +421,23 @@ async function txHandler(
       const senderUsdcBalance = senderUsdcBalanceResult.value;
       console.log(`[API] /api/tx - Sender USDC: ${senderUsdcBalance.value.uiAmount} | rent deducted: ${(ataRentInUsdcRaw / 1e6).toFixed(6)}`);
 
-      // Rent is deducted from transfer amount — sender only needs amount + fee, not amount + fee + rent
-      const requiredAmount = amountInUiUnits + feeInUiUnits;
-      if (senderUsdcBalance.value.uiAmount === null || senderUsdcBalance.value.uiAmount < requiredAmount) {
+      // Rent is deducted from transfer amounts — base need is amount + fee
+      // (each ATA rent is reimbursed out of its own transfer, not added on top).
+      const available = senderUsdcBalance.value.uiAmount;
+      const baseRequired = amountInUiUnits + feeInUiUnits;
+      if (available === null || available < baseRequired) {
         return res.status(400).json(encryptionMiddleware.processResponse({
           result: "error",
-          message: `Insufficient USDC balance. Required: ${requiredAmount} USDC, Available: ${senderUsdcBalance.value.uiAmount || 0} USDC`
+          message: `Insufficient USDC balance. Required: ${baseRequired} USDC, Available: ${available || 0} USDC`
         }, req.headers));
+      }
+
+      // Edge case: balance covers the transfer but not the extra savings → drop spend & save.
+      if (spendNSaveRaw > 0 && available < baseRequired + spendNSaveUiUnits) {
+        console.log(`[API] /api/tx - Dropping spend & save: balance ${available} USDC can't cover amount + fee + savings (${baseRequired + spendNSaveUiUnits} USDC)`);
+        dropSpendNSave();
+        ataCreationCount = receiverNeedsAta ? 1 : 0;
+        totalAtaCreationCost = ataCreationCount * ATA_RENT_LAMPORTS;
       }
 
       if (receiverNeedsAta) {
@@ -397,6 +446,16 @@ async function txHandler(
           return res.status(400).json(encryptionMiddleware.processResponse({
             result: "error",
             message: `Amount too small: after deducting ATA rent (${(ataRentInUsdcRaw / 1e6).toFixed(6)} USDC), receiver would get ${(netTransferRaw / 1e6).toFixed(6)} USDC, below the minimum of ${MIN_TRANSFER_AMOUNT / 1e6} USDC`
+          }, req.headers));
+        }
+      }
+
+      if (spendNSaveNeedsAta) {
+        const netSpendNSaveRaw = spendNSaveRaw - spendNSaveRentRaw;
+        if (netSpendNSaveRaw <= 0) {
+          return res.status(400).json(encryptionMiddleware.processResponse({
+            result: "error",
+            message: `Spend & save amount too small: after deducting ATA rent (${(spendNSaveRentRaw / 1e6).toFixed(6)} USDC), the savings wallet would receive ${(netSpendNSaveRaw / 1e6).toFixed(6)} USDC`
           }, req.headers));
         }
       }
@@ -430,6 +489,28 @@ async function txHandler(
       ? amountInRawUnits - ataRentInUsdcRaw
       : amountInRawUnits;
     instructions.push(createTransferInstruction(senderAta, receiverAta, sender, netTransferAmount));
+
+    // Spend & Save: optional ATA creation (+ atomic rent reimbursement) then transfer.
+    // Savings wallet receives (spend&save − rent) for the USDC+ATA case, full amount otherwise.
+    if (spendNSaveRaw > 0 && spendNSaveAta && spendNSaveWallet) {
+      if (spendNSaveNeedsAta) {
+        instructions.push(
+          createAssociatedTokenAccountInstruction(relayerWallet.publicKey, spendNSaveAta, spendNSaveWallet, mint)
+        );
+        if (spendNSaveRentRaw > 0) {
+          const rentSourceAta = mint.equals(USDC_MINT) ? senderAta : senderUsdcAta;
+          console.log(`[API] /api/tx - Bundling spend&save rent reimbursement: ${(spendNSaveRentRaw / 1e6).toFixed(6)} USDC → relayer`);
+          instructions.push(
+            createTransferInstruction(rentSourceAta, relayerUsdcAta, sender, spendNSaveRentRaw)
+          );
+        }
+      }
+      const netSpendNSaveAmount = spendNSaveNeedsAta && mint.equals(USDC_MINT)
+        ? spendNSaveRaw - spendNSaveRentRaw
+        : spendNSaveRaw;
+      console.log(`[API] /api/tx - Spend&save transfer: ${(netSpendNSaveAmount / 1e6).toFixed(6)} (${spendNSavePercentage}% of amount) → savings wallet`);
+      instructions.push(createTransferInstruction(senderAta, spendNSaveAta, sender, netSpendNSaveAmount));
+    }
 
     // Fee transfer
     if (feeReceiverAta && feeReceiver && feeInRawUnits > 0) {
@@ -466,8 +547,10 @@ async function txHandler(
         estimatedTotalCost,
         ataCreationCost: totalAtaCreationCost,
         ataCreationCount,
-        ataRentDeductedUsdc: ataRentInUsdcRaw / 1e6,
-        ataRentDeductedRaw: ataRentInUsdcRaw,
+        ataRentDeductedUsdc: (ataRentInUsdcRaw + spendNSaveRentRaw) / 1e6,
+        ataRentDeductedRaw: ataRentInUsdcRaw + spendNSaveRentRaw,
+        spendNSaveAmountUsdc: spendNSaveRaw / 1e6,
+        spendNSaveAmountRaw: spendNSaveRaw,
       },
     };
 

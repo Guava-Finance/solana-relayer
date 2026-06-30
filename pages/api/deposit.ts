@@ -55,8 +55,16 @@ interface Step {
 interface DepositRequest {
   steps: Step[];
   sender_wallet_address: string;
+  // Total USDC amount (raw, 6 decimals) being deposited — used as the base for
+  // the spend & save calculation.
+  transaction_amount?: number;
   transaction_fee?: number;
   transaction_fee_address?: string;
+  // Spend & Save: when both are set, the relayer carves this percentage of
+  // `transaction_amount` and routes it to the savings wallet in the same
+  // transaction. Mirrors the rules on /api/tx.
+  spend_n_save_wallet?: string;
+  spend_n_save_percentage?: number;
 }
 
 interface DepositResponse {
@@ -72,6 +80,9 @@ interface DepositResponse {
         ataCreationCount?: number;
         ataCreationCostInUsdc?: number;
         senderPaysAtaCreation?: boolean;
+        spendNSaveAmountUsdc?: number;
+        spendNSaveAmountRaw?: number;
+        spendNSaveBaseAmountRaw?: number;
       }
     | string;
 }
@@ -166,6 +177,47 @@ async function depositHandler(
         return res.status(400).json(encryptionMiddleware.processResponse({
           result: "error",
           message: "transaction_fee_address is not a valid Solana public key",
+        }, req.headers));
+      }
+    }
+
+    // ── Spend & Save validation (optional) ──────────────────────────────────
+    // Both fields must be provided together; the percentage carves an extra
+    // transfer out of the deposit amount (read from `steps`) and routes it to
+    // the savings wallet. Same rules as /api/tx.
+    const hasSpendNSave =
+      (body.spend_n_save_wallet !== undefined && body.spend_n_save_wallet !== null) ||
+      (body.spend_n_save_percentage !== undefined && body.spend_n_save_percentage !== null);
+    let spendNSavePercentage = 0;
+    let spendNSaveWallet: PublicKey | null = null;
+    if (hasSpendNSave) {
+      if (!body.spend_n_save_wallet || typeof body.spend_n_save_wallet !== "string") {
+        return res.status(400).json(encryptionMiddleware.processResponse({
+          result: "error",
+          message: "spend_n_save_wallet is required and must be a string when spend & save is used",
+        }, req.headers));
+      }
+      spendNSavePercentage =
+        typeof body.spend_n_save_percentage === "string"
+          ? parseFloat(body.spend_n_save_percentage)
+          : (body.spend_n_save_percentage as number);
+      if (
+        typeof spendNSavePercentage !== "number" ||
+        isNaN(spendNSavePercentage) ||
+        spendNSavePercentage <= 0 ||
+        spendNSavePercentage > 100
+      ) {
+        return res.status(400).json(encryptionMiddleware.processResponse({
+          result: "error",
+          message: "spend_n_save_percentage is required and must be a number between 0 and 100",
+        }, req.headers));
+      }
+      try {
+        spendNSaveWallet = new PublicKey(body.spend_n_save_wallet);
+      } catch {
+        return res.status(400).json(encryptionMiddleware.processResponse({
+          result: "error",
+          message: "spend_n_save_wallet is not a valid Solana public key",
         }, req.headers));
       }
     }
@@ -302,6 +354,70 @@ async function depositHandler(
       console.log(`[API] /api/deposit - Appended USDC fee transfer: ${transactionFee} units from ${senderPubkey.toBase58()} to ${feeDestPubkey.toBase58()}`);
     }
 
+    // ── Spend & Save ─────────────────────────────────────────────────────────
+    // Carve `spend_n_save_percentage` out of `transaction_amount` (raw USDC) and
+    // transfer it to the savings wallet. The relayer pays the savings ATA
+    // creation when it doesn't yet exist (no sender reimbursement).
+    let spendNSaveBaseRaw = 0;
+    let spendNSaveAmountRaw = 0;
+    if (hasSpendNSave && spendNSaveWallet !== null) {
+      const senderUsdcAta = await getAssociatedTokenAddress(USDC_MINT, senderPubkey);
+      spendNSaveBaseRaw =
+        typeof body.transaction_amount === "string"
+          ? parseFloat(body.transaction_amount)
+          : (body.transaction_amount ?? 0);
+      if (typeof spendNSaveBaseRaw !== "number" || isNaN(spendNSaveBaseRaw) || spendNSaveBaseRaw <= 0) {
+        spendNSaveBaseRaw = 0;
+      }
+      spendNSaveAmountRaw = Math.floor((spendNSaveBaseRaw * spendNSavePercentage) / 100);
+      console.log(`[API] /api/deposit - Spend & save base (transaction_amount): ${spendNSaveBaseRaw} | ${spendNSavePercentage}% = ${spendNSaveAmountRaw}`);
+
+      if (spendNSaveAmountRaw > 0) {
+        const spendNSaveAta = await getAssociatedTokenAddress(USDC_MINT, spendNSaveWallet);
+
+        let spendNSaveAtaExists = false;
+        try {
+          await getAccount(connection, spendNSaveAta);
+          spendNSaveAtaExists = true;
+        } catch (err) {
+          if (
+            err instanceof TokenAccountNotFoundError ||
+            err instanceof TokenInvalidAccountOwnerError
+          ) {
+            spendNSaveAtaExists = false;
+          } else {
+            throw err;
+          }
+        }
+
+        if (!spendNSaveAtaExists) {
+          instructions.push(
+            createAssociatedTokenAccountIdempotentInstruction(
+              relayerWallet.publicKey, // payer (relayer pays savings ATA creation)
+              spendNSaveAta,
+              spendNSaveWallet,
+              USDC_MINT
+            )
+          );
+          ataCreationCost += 2_039_280;
+          ataCreationCount += 1;
+          console.log(`[API] /api/deposit - Savings ATA does not exist, adding creation instruction (relayer-paid)`);
+        }
+
+        instructions.push(
+          createTransferInstruction(
+            senderUsdcAta,
+            spendNSaveAta,
+            senderPubkey,
+            spendNSaveAmountRaw
+          )
+        );
+        console.log(`[API] /api/deposit - Appended spend & save transfer: ${spendNSaveAmountRaw} units → ${spendNSaveWallet.toBase58()}`);
+      } else {
+        console.log(`[API] /api/deposit - Skipping spend & save: transaction_amount missing/invalid or computed savings is 0`);
+      }
+    }
+
     const transaction = new Transaction().add(...instructions);
 
     const { blockhash, lastValidBlockHeight } =
@@ -362,6 +478,9 @@ async function depositHandler(
         ataCreationCount,
         ataCreationCostInUsdc,
         senderPaysAtaCreation: false,
+        spendNSaveAmountUsdc: spendNSaveAmountRaw / 1e6,
+        spendNSaveAmountRaw,
+        spendNSaveBaseAmountRaw: spendNSaveBaseRaw,
       },
     }, req.headers));
   } catch (error) {

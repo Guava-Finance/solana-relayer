@@ -14,6 +14,8 @@ import {
   getAccount,
   TokenAccountNotFoundError,
   TokenInvalidAccountOwnerError,
+  TOKEN_PROGRAM_ID,
+  TOKEN_2022_PROGRAM_ID,
 } from "@solana/spl-token";
 import base58 from "bs58";
 import type { NextApiRequest, NextApiResponse } from "next";
@@ -42,7 +44,7 @@ interface StepItem {
   };
 }
 
-interface Step {
+export interface Step {
   id: string;
   action?: string;
   description?: string;
@@ -83,6 +85,9 @@ interface DepositResponse {
         spendNSaveAmountUsdc?: number;
         spendNSaveAmountRaw?: number;
         spendNSaveBaseAmountRaw?: number;
+        // True when spend & save was requested but dropped because the wallet
+        // could not cover the deposit + fee on top of it.
+        spendNSaveDropped?: boolean;
       }
     | string;
 }
@@ -99,6 +104,49 @@ function hexToBytes(hex: string): Uint8Array {
     bytes[i / 2] = parseInt(cleanHex.substring(i, i + 2), 16);
   }
   return bytes;
+}
+
+// SPL Token instruction discriminators; both carry the amount as a u64 LE at
+// byte offset 1, and both take the source account as their first key.
+const SPL_TRANSFER = 3;
+const SPL_TRANSFER_CHECKED = 12;
+
+/**
+ * USDC (raw units) the Relay.link steps already pull out of [senderUsdcAta].
+ *
+ * The deposit amount isn't in the request body: it lives inside the
+ * instructions Relay handed us, and it is larger than `transaction_amount`
+ * because it carries Relay's bridging fee. Anything that isn't an SPL transfer
+ * spending the sender's USDC account (memos, compute budget, other programs)
+ * is ignored.
+ */
+export function sumSenderTransfers(steps: Step[], senderUsdcAta: PublicKey): number {
+  const tokenPrograms = [TOKEN_PROGRAM_ID.toBase58(), TOKEN_2022_PROGRAM_ID.toBase58()];
+  const source = senderUsdcAta.toBase58();
+  let total = 0;
+
+  for (const step of steps) {
+    if (!step.items || !Array.isArray(step.items)) continue;
+
+    for (const item of step.items) {
+      if (!item.data || !Array.isArray(item.data.instructions)) continue;
+
+      for (const rawIx of item.data.instructions) {
+        if (!rawIx.programId || !rawIx.keys || !rawIx.data) continue;
+        if (!tokenPrograms.includes(rawIx.programId)) continue;
+        if (rawIx.keys[0]?.pubkey !== source) continue;
+
+        const data = hexToBytes(rawIx.data);
+        if (data.length < 9) continue;
+        if (data[0] !== SPL_TRANSFER && data[0] !== SPL_TRANSFER_CHECKED) continue;
+
+        const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+        total += Number(view.getBigUint64(1, true));
+      }
+    }
+  }
+
+  return total;
 }
 
 function buildTransactionInstruction(raw: RawInstruction): TransactionInstruction {
@@ -360,6 +408,7 @@ async function depositHandler(
     // creation when it doesn't yet exist (no sender reimbursement).
     let spendNSaveBaseRaw = 0;
     let spendNSaveAmountRaw = 0;
+    let spendNSaveDropped = false;
     if (hasSpendNSave && spendNSaveWallet !== null) {
       const senderUsdcAta = await getAssociatedTokenAddress(USDC_MINT, senderPubkey);
       spendNSaveBaseRaw =
@@ -371,6 +420,35 @@ async function depositHandler(
       }
       spendNSaveAmountRaw = Math.floor((spendNSaveBaseRaw * spendNSavePercentage) / 100);
       console.log(`[API] /api/deposit - Spend & save base (transaction_amount): ${spendNSaveBaseRaw} | ${spendNSavePercentage}% = ${spendNSaveAmountRaw}`);
+
+      // The savings transfer is added ON TOP of the deposit + fee, so a wallet
+      // that can only cover deposit + fee makes the whole transaction fail in
+      // simulation. Drop spend & save instead and let the payout through.
+      // `transaction_amount` is a floor for the deposit: the Relay instructions
+      // pull that plus Relay's bridging fee.
+      if (spendNSaveAmountRaw > 0) {
+        const depositRaw = Math.max(sumSenderTransfers(body.steps, senderUsdcAta), spendNSaveBaseRaw);
+        const requiredRaw = depositRaw + transactionFee + spendNSaveAmountRaw;
+
+        let balanceRaw: number | null = null;
+        try {
+          const balance = await connection.getTokenAccountBalance(senderUsdcAta);
+          balanceRaw = Number(balance.value.amount);
+        } catch (err) {
+          // Unreadable balance is not a reason to strip the user's savings.
+          console.warn(`[API] /api/deposit - Could not read sender USDC balance, keeping spend & save:`, err);
+        }
+
+        if (balanceRaw !== null && balanceRaw < requiredRaw) {
+          console.log(
+            `[API] /api/deposit - Dropping spend & save: balance ${(balanceRaw / 1e6).toFixed(6)} USDC can't cover ` +
+            `deposit ${(depositRaw / 1e6).toFixed(6)} + fee ${(transactionFee / 1e6).toFixed(6)} + savings ` +
+            `${(spendNSaveAmountRaw / 1e6).toFixed(6)} (${(requiredRaw / 1e6).toFixed(6)} USDC)`
+          );
+          spendNSaveAmountRaw = 0;
+          spendNSaveDropped = true;
+        }
+      }
 
       if (spendNSaveAmountRaw > 0) {
         const spendNSaveAta = await getAssociatedTokenAddress(USDC_MINT, spendNSaveWallet);
@@ -413,7 +491,7 @@ async function depositHandler(
           )
         );
         console.log(`[API] /api/deposit - Appended spend & save transfer: ${spendNSaveAmountRaw} units → ${spendNSaveWallet.toBase58()}`);
-      } else {
+      } else if (!spendNSaveDropped) {
         console.log(`[API] /api/deposit - Skipping spend & save: transaction_amount missing/invalid or computed savings is 0`);
       }
     }
@@ -481,6 +559,7 @@ async function depositHandler(
         spendNSaveAmountUsdc: spendNSaveAmountRaw / 1e6,
         spendNSaveAmountRaw,
         spendNSaveBaseAmountRaw: spendNSaveBaseRaw,
+        spendNSaveDropped,
       },
     }, req.headers));
   } catch (error) {
